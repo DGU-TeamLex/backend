@@ -72,7 +72,7 @@ def _z_for_level(level):
 # ---- 재고/적정재고 (inventory + inventory_policy) 생성 ----
 # (institution, code, on_hand, available, mu, sigma, base_lead)
 _INV_RAW = [
-    ("inst_012", "KD0192", 420, 410, 180.0, 52.0, 1.0),
+    ("inst_012", "KD0192", 820, 800, 180.0, 52.0, 1.0),
     ("inst_012", "KD0451", 38, 30, 60.0, 22.0, 1.2),
     ("inst_012", "KD0820", 12, 9, 25.0, 11.0, 1.0),
     ("inst_012", "KD1490", 1500, 1500, 800.0, 240.0, 1.0),
