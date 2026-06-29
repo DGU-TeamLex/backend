@@ -1,20 +1,20 @@
 """
-WeP/TeamLex API — Vercel(Python 서버리스) 배포 진입점.
+TeamLex API — Vercel(Python 서버리스) 배포 진입점.
 
-routers/ 패키지의 모든 모듈을 스캔해 `router` (APIRouter) 를 자동 등록한다.
-새 기능은 routers/<slug>.py 에 `router = APIRouter(...)` 만 추가하면 이 파일을 수정하지
-않아도 자동으로 배포된다. (vercel.json 의 includeFiles 로 routers/** 가 함께 번들된다.)
+기능별 라우터(routers/<slug>.py 의 `router`)를 정적 import 하여 등록한다.
+정적 import 라서 Vercel 이 routers/ 파일을 자동으로 번들한다.
+
+새 기능 추가 방법 (spec-bot 루틴 / 사람 공통):
+  1) routers/<slug>.py 에 `router = APIRouter(prefix="/api/v1", ...)` 정의
+  2) 아래 "라우터 등록" 구역에 두 줄 추가:
+       from routers import <slug>
+       app.include_router(<slug>.router)
 
 vercel.json 의 rewrite 로 모든 경로가 이 함수(/api/index)로 라우팅되고,
 FastAPI 가 원본 경로(/api/v1/... 등)로 다시 라우팅한다.
 """
-import importlib
-import pkgutil
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
-import routers
 
 app = FastAPI(title="TeamLex API", version="0.1.0-draft")
 
@@ -33,17 +33,8 @@ def health():
     return {"status": "ok"}
 
 
-# routers/ 패키지의 모든 라우터 자동 등록
-_registered = []
-for _finder, _name, _ispkg in pkgutil.iter_modules(routers.__path__):
-    _module = importlib.import_module(f"routers.{_name}")
-    _router = getattr(_module, "router", None)
-    if _router is not None:
-        app.include_router(_router)
-        _registered.append(_name)
+# ===== 라우터 등록 (기능 추가 시 여기에 두 줄씩) =====
+from routers import wep_stock  # noqa: E402
 
-
-@app.get("/api/_registered")
-def registered():
-    """디버그: 자동 등록된 라우터 목록."""
-    return {"routers": _registered}
+app.include_router(wep_stock.router)
+# ===================================================
