@@ -4,9 +4,10 @@
 실제 운영의 인테이크/표준화(A)/예측(B)/공급위험(C)/적정재고(D) 파이프라인 산출물을
 현실적인 값으로 표현한 시연용 백엔드. 엔드포인트는 명세 모듈별 태그로 그룹화된다.
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from . import wep_data as D
+from . import wep_inventory as INV
 
 router = APIRouter(prefix="/api/v1")
 
@@ -41,9 +42,39 @@ def me(role: str = "CENTRAL", institutionId: str | None = None):
 
 
 # ===== 마스터 =====
-@router.get("/institutions", tags=T_MASTER, summary="기관 목록")
-def institutions():
-    return {"items": D.INSTITUTIONS, "totalElements": len(D.INSTITUTIONS)}
+@router.get("/institutions", tags=T_MASTER, summary="기관 목록(전국, 필터·페이지)")
+def institutions(sido: str | None = None, sigungu: str | None = None, category: str | None = None,
+                 q: str | None = None, page: int = 1, size: int = 50):
+    items = INV._filtered(category=category, sido=sido, sigungu=sigungu, q=q)
+    total = len(items)
+    start = (page - 1) * size
+    return {"items": items[start:start + size], "page": page, "size": size,
+            "totalElements": total, "totalPages": (total + size - 1) // size}
+
+
+# ===== 지역·유형 탐색 (이슈 #8: 지역별·기관유형별 재고 조회) =====
+@router.get("/facility-categories", tags=T_MASTER, summary="기관유형 분류(보건소/보건지소/보건진료소)+개수")
+def facility_categories():
+    return {"items": INV.categories()}
+
+
+@router.get("/facility-regions", tags=T_MASTER, summary="시도(또는 시군구) 목록+개수")
+def facility_regions(category: str | None = None, sido: str | None = None):
+    return INV.regions(category=category, sido=sido)
+
+
+@router.get("/facilities", tags=T_MASTER, summary="기관 목록+상태요약(지역·유형 필터)")
+def facilities(category: str | None = None, sido: str | None = None, sigungu: str | None = None,
+               q: str | None = None, limit: int = Query(300, le=500)):
+    return INV.facilities(category=category, sido=sido, sigungu=sigungu, q=q, limit=limit)
+
+
+@router.get("/facilities/{institution_id}", tags=["대시보드"], summary="기관 상세+재고 현황")
+def facility_detail(institution_id: str):
+    d = INV.facility_detail(institution_id)
+    if not d:
+        raise HTTPException(404, "institution not found")
+    return d
 
 
 @router.get("/item-groups", tags=T_MASTER, summary="품목군 목록(+위험레벨)")
@@ -121,9 +152,9 @@ def supply_risk_one(item_group_id: str):
 
 
 # ===== 모듈 D — 적정재고 / 발주 / 재배치 =====
-@router.get("/inventory-policy", tags=T_D, summary="SS/ROP·재고 현황 목록")
+@router.get("/inventory-policy", tags=T_D, summary="SS/ROP·재고 현황 목록(주요 보건소 샘플)")
 def inventory_policy(institution: str | None = None, status: str | None = None):
-    rows = D.INVENTORY
+    rows = INV.sample_inventory_rows()
     if institution:
         rows = [r for r in rows if r["institutionId"] == institution]
     if status:
@@ -141,7 +172,7 @@ def inventory_policy_one(institution_id: str, standard_code: str):
 
 @router.get("/order-recommendations", tags=T_D, summary="발주 권고(수량·시점)")
 def order_recommendations(institution: str | None = None):
-    rows = [r for r in D.INVENTORY if r["orderRecommendation"] > 0]
+    rows = [r for r in INV.sample_inventory_rows() if r["orderRecommendation"] > 0]
     if institution:
         rows = [r for r in rows if r["institutionId"] == institution]
     rows = sorted(rows, key=lambda r: r["orderRecommendation"], reverse=True)
@@ -199,14 +230,16 @@ def dashboard_central():
     sev = {}
     for a in open_alerts:
         sev[a["severity"]] = sev.get(a["severity"], 0) + 1
+    sample = INV.sample_inventory_rows()
     shortage = {}
-    for r in D.INVENTORY:
+    nm = {}
+    for r in sample:
+        nm[r["institutionId"]] = r["institutionName"]
         if r["status"] in ("BELOW_ROP", "CRITICAL"):
             shortage[r["institutionId"]] = shortage.get(r["institutionId"], 0) + 1
-    nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
     top_shortage = sorted(
         [{"institutionId": k, "institutionName": nm.get(k), "shortageItems": v} for k, v in shortage.items()],
-        key=lambda x: x["shortageItems"], reverse=True)
+        key=lambda x: x["shortageItems"], reverse=True)[:8]
     name = {g["itemGroupId"]: g["name"] for g in D.ITEM_GROUPS}
     risk_rank = sorted(
         [{"itemGroupId": r["itemGroupId"], "itemGroupName": name.get(r["itemGroupId"]), "riskScore": r["riskScore"], "level": r["level"]}
@@ -214,12 +247,12 @@ def dashboard_central():
     return {
         "asOf": D.TODAY,
         "summary": {
-            "institutions": len(D.INSTITUTIONS),
+            "institutions": len(INV.INSTITUTIONS),
             "standardItems": len(D.STANDARD_ITEMS),
             "itemGroups": len(D.ITEM_GROUPS),
             "openAlerts": len(open_alerts),
-            "totalOnHand": sum(r["onHand"] for r in D.INVENTORY),
-            "belowRopItems": sum(1 for r in D.INVENTORY if r["status"] in ("BELOW_ROP", "CRITICAL")),
+            "totalOnHand": sum(r["onHand"] for r in sample),
+            "belowRopItems": sum(1 for r in sample if r["status"] in ("BELOW_ROP", "CRITICAL")),
             "criticalRiskGroups": sum(1 for r in D.SUPPLY_RISK if r["level"] == "CRITICAL"),
         },
         "alertsBySeverity": sev,
