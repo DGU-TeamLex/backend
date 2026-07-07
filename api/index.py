@@ -8,6 +8,7 @@ API 문서:
   - Swagger UI : /docs
   - ReDoc      : /redoc
   - OpenAPI    : /openapi.json
+  - GraphQL    : /graphql (GraphiQL IDE 포함, 사업수행계획서 4.3.2 REST+GraphQL 대응)
 루트(/) 접속 시 /docs 로 리다이렉트한다.
 
 새 기능 추가 방법 (spec-bot 루틴 / 사람 공통):
@@ -74,4 +75,11 @@ def health():
 from routers import wep_stock  # noqa: E402
 
 app.include_router(wep_stock.router)
+# ===================================================
+
+# ===== GraphQL (REST 병행, 사업수행계획서 4.3.2) =====
+from strawberry.fastapi import GraphQLRouter  # noqa: E402
+from routers.graphql_schema import schema  # noqa: E402
+
+app.include_router(GraphQLRouter(schema), prefix="/graphql")
 # ===================================================
