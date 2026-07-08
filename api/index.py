@@ -79,7 +79,9 @@ app.include_router(wep_stock.router)
 
 # ===== GraphQL (REST 병행, 사업수행계획서 4.3.2) =====
 from strawberry.fastapi import GraphQLRouter  # noqa: E402
-from routers.graphql_schema import schema  # noqa: E402
+from routers.graphql_schema import schema, get_context  # noqa: E402
 
-app.include_router(GraphQLRouter(schema), prefix="/graphql")
+# context_getter: 요청마다 새 DataLoader 세트를 만들어 Institution.inventory/summary
+# 같은 중첩 필드가 여러 기관에 대해 동시 요청될 때 배치 조회되게 한다(N+1 방지).
+app.include_router(GraphQLRouter(schema, context_getter=get_context), prefix="/graphql")
 # ===================================================
