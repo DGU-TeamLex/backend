@@ -1,13 +1,14 @@
 """WeP-Stock — 전국 보건기관 의료물품 통합 재고관리 API (데모 구현).
 
-명세(기능/데이터모델/API)의 핵심 엔드포인트를 시드 데이터로 제공한다.
-실제 운영의 인테이크/표준화(A)/예측(B)/공급위험(C)/적정재고(D) 파이프라인 산출물을
-현실적인 값으로 표현한 시연용 백엔드. 엔드포인트는 명세 모듈별 태그로 그룹화된다.
+기관(전국 실데이터)·재고·알림은 Neon Postgres(db/queries.py)에서 조회한다.
+예측(B)/공급위험(C)/외부지표/인테이크/표준화검수/재배치는 아직 실 파이프라인이
+없어 시드 데이터(wep_data.py)를 그대로 쓴다. 엔드포인트는 명세 모듈별 태그로
+그룹화된다.
 """
 from fastapi import APIRouter, HTTPException, Query
 
 from . import wep_data as D
-from . import wep_inventory as INV
+from db import queries as DB
 
 router = APIRouter(prefix="/api/v1")
 
@@ -41,11 +42,11 @@ def me(role: str = "CENTRAL", institutionId: str | None = None):
     return {"id": "u_demo", "role": role, "institutionId": institutionId}
 
 
-# ===== 마스터 =====
+# ===== 마스터 (기관: Postgres, 실데이터 3,598곳) =====
 @router.get("/institutions", tags=T_MASTER, summary="기관 목록(전국, 필터·페이지)")
 def institutions(sido: str | None = None, sigungu: str | None = None, category: str | None = None,
                  q: str | None = None, page: int = 1, size: int = 50):
-    items = INV._filtered(category=category, sido=sido, sigungu=sigungu, q=q)
+    items = DB.list_institutions(category=category, sido=sido, sigungu=sigungu, q=q)
     total = len(items)
     start = (page - 1) * size
     return {"items": items[start:start + size], "page": page, "size": size,
@@ -55,23 +56,23 @@ def institutions(sido: str | None = None, sigungu: str | None = None, category: 
 # ===== 지역·유형 탐색 (이슈 #8: 지역별·기관유형별 재고 조회) =====
 @router.get("/facility-categories", tags=T_MASTER, summary="기관유형 분류(보건소/보건지소/보건진료소)+개수")
 def facility_categories():
-    return {"items": INV.categories()}
+    return {"items": DB.categories()}
 
 
 @router.get("/facility-regions", tags=T_MASTER, summary="시도(또는 시군구) 목록+개수")
 def facility_regions(category: str | None = None, sido: str | None = None):
-    return INV.regions(category=category, sido=sido)
+    return DB.regions(category=category, sido=sido)
 
 
 @router.get("/facilities", tags=T_MASTER, summary="기관 목록+상태요약(지역·유형 필터)")
 def facilities(category: str | None = None, sido: str | None = None, sigungu: str | None = None,
                q: str | None = None, limit: int = Query(300, le=500)):
-    return INV.facilities(category=category, sido=sido, sigungu=sigungu, q=q, limit=limit)
+    return DB.facilities(category=category, sido=sido, sigungu=sigungu, q=q, limit=limit)
 
 
 @router.get("/facilities/{institution_id}", tags=["대시보드"], summary="기관 상세+재고 현황")
 def facility_detail(institution_id: str):
-    d = INV.facility_detail(institution_id)
+    d = DB.facility_detail(institution_id)
     if not d:
         raise HTTPException(404, "institution not found")
     return d
@@ -151,36 +152,26 @@ def supply_risk_one(item_group_id: str):
     return r
 
 
-# ===== 모듈 D — 적정재고 / 발주 / 재배치 =====
-@router.get("/inventory-policy", tags=T_D, summary="SS/ROP·재고 현황 목록(주요 보건소 샘플)")
+# ===== 모듈 D — 적정재고 / 발주 / 재배치 (Postgres) =====
+@router.get("/inventory-policy", tags=T_D, summary="SS/ROP·재고 현황 목록(전국, 시급도순)")
 def inventory_policy(institution: str | None = None, status: str | None = None):
-    rows = INV.sample_inventory_rows()
-    if institution:
-        rows = [r for r in rows if r["institutionId"] == institution]
-    if status:
-        rows = [r for r in rows if r["status"] == status]
+    rows = DB.inventory_policy_rows(institution=institution, status=status)
     return {"items": rows, "totalElements": len(rows)}
 
 
-@router.get("/inventory-policy/{institution_id}/{standard_code}", tags=T_D, summary="단일 SS/ROP·근거·민감도")
+@router.get("/inventory-policy/{institution_id}/{standard_code}", tags=T_D, summary="단일 SS/ROP·근거")
 def inventory_policy_one(institution_id: str, standard_code: str):
-    for r in D.INVENTORY:
-        if r["institutionId"] == institution_id and r["standardCode"] == standard_code:
-            return r
+    rows = DB.inventory_policy_rows(institution=institution_id)
+    for r in rows:
+        if r["standardCode"] == standard_code:
+            return {**r, "assumedLeadTime": True}
     raise HTTPException(404, "policy not found")
 
 
 @router.get("/order-recommendations", tags=T_D, summary="발주 권고(수량·시점)")
 def order_recommendations(institution: str | None = None):
-    rows = [r for r in INV.sample_inventory_rows() if r["orderRecommendation"] > 0]
-    if institution:
-        rows = [r for r in rows if r["institutionId"] == institution]
-    rows = sorted(rows, key=lambda r: r["orderRecommendation"], reverse=True)
-    out = [{"institutionId": r["institutionId"], "institutionName": r["institutionName"], "standardCode": r["standardCode"],
-            "standardName": r["standardName"], "available": r["available"], "ROP": r["ROP"], "target": r["target"],
-            "recommendedQty": r["orderRecommendation"], "uom": r["uom"], "supplyRiskLevel": r["supplyRiskLevel"],
-            "status": r["status"]} for r in rows]
-    return {"items": out, "totalElements": len(out)}
+    rows = DB.order_recommendations(institution=institution)
+    return {"items": rows, "totalElements": len(rows)}
 
 
 @router.get("/relocations", tags=T_D, summary="재배치 제안 목록")
@@ -192,29 +183,19 @@ def relocations():
     return {"items": out, "totalElements": len(out)}
 
 
-# ===== 알림 =====
+# ===== 알림 (Postgres) =====
 @router.get("/alerts", tags=T_ALERT, summary="알림 목록")
 def alerts(severity: str | None = None, type: str | None = None, resolved: bool | None = None, institution: str | None = None):
-    rows = D.ALERTS
-    if severity:
-        rows = [a for a in rows if a["severity"] == severity]
-    if type:
-        rows = [a for a in rows if a["alertType"] == type]
-    if resolved is not None:
-        rows = [a for a in rows if (a["resolvedAt"] is not None) == resolved]
-    if institution:
-        rows = [a for a in rows if a.get("institutionId") == institution]
-    nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
-    rows = [{**a, "institutionName": nm.get(a.get("institutionId")) if a.get("institutionId") else None} for a in rows]
+    rows = DB.alerts_list(severity=severity, alert_type=type, resolved=resolved, institution=institution)
     return {"items": rows, "totalElements": len(rows)}
 
 
 @router.get("/alerts/{alert_id}", tags=T_ALERT, summary="알림 상세(근거 포함)")
 def alert_one(alert_id: str):
-    for a in D.ALERTS:
-        if a["alertId"] == alert_id:
-            return a
-    raise HTTPException(404, "alert not found")
+    a = DB.alert_one(alert_id)
+    if not a:
+        raise HTTPException(404, "alert not found")
+    return a
 
 
 # ===== 외부지표 =====
@@ -223,23 +204,15 @@ def external_indicators():
     return {"items": D.EXTERNAL_INDICATORS, "totalElements": len(D.EXTERNAL_INDICATORS)}
 
 
-# ===== 대시보드 =====
+# ===== 대시보드 (Postgres 집계) =====
 @router.get("/dashboard/central", tags=T_DASH, summary="중앙 뷰 대시보드")
 def dashboard_central():
-    open_alerts = [a for a in D.ALERTS if a["resolvedAt"] is None]
+    open_alerts = DB.alerts_list(resolved=False)
     sev = {}
     for a in open_alerts:
         sev[a["severity"]] = sev.get(a["severity"], 0) + 1
-    sample = INV.sample_inventory_rows()
-    shortage = {}
-    nm = {}
-    for r in sample:
-        nm[r["institutionId"]] = r["institutionName"]
-        if r["status"] in ("BELOW_ROP", "CRITICAL"):
-            shortage[r["institutionId"]] = shortage.get(r["institutionId"], 0) + 1
-    top_shortage = sorted(
-        [{"institutionId": k, "institutionName": nm.get(k), "shortageItems": v} for k, v in shortage.items()],
-        key=lambda x: x["shortageItems"], reverse=True)[:8]
+    core = DB.dashboard_central_summary()
+    top_shortage = DB.top_shortage_institutions(8)
     name = {g["itemGroupId"]: g["name"] for g in D.ITEM_GROUPS}
     risk_rank = sorted(
         [{"itemGroupId": r["itemGroupId"], "itemGroupName": name.get(r["itemGroupId"]), "riskScore": r["riskScore"], "level": r["level"]}
@@ -247,12 +220,12 @@ def dashboard_central():
     return {
         "asOf": D.TODAY,
         "summary": {
-            "institutions": len(INV.INSTITUTIONS),
+            "institutions": core["institutions"],
             "standardItems": len(D.STANDARD_ITEMS),
             "itemGroups": len(D.ITEM_GROUPS),
             "openAlerts": len(open_alerts),
-            "totalOnHand": sum(r["onHand"] for r in sample),
-            "belowRopItems": sum(1 for r in sample if r["status"] in ("BELOW_ROP", "CRITICAL")),
+            "totalOnHand": core["totalOnHand"],
+            "belowRopItems": core["belowRopItems"],
             "criticalRiskGroups": sum(1 for r in D.SUPPLY_RISK if r["level"] == "CRITICAL"),
         },
         "alertsBySeverity": sev,
@@ -271,20 +244,7 @@ def _relocations_enriched():
 
 @router.get("/dashboard/institution/{institution_id}", tags=T_DASH, summary="기관 뷰 대시보드")
 def dashboard_institution(institution_id: str):
-    inst = D.INST_BY_ID.get(institution_id)
-    if not inst:
+    d = DB.dashboard_institution(institution_id)
+    if not d:
         raise HTTPException(404, "institution not found")
-    inv = [r for r in D.INVENTORY if r["institutionId"] == institution_id]
-    al = [a for a in D.ALERTS if a.get("institutionId") == institution_id]
-    return {
-        "asOf": D.TODAY,
-        "institution": inst,
-        "summary": {
-            "trackedItems": len(inv),
-            "belowRop": sum(1 for r in inv if r["status"] in ("BELOW_ROP", "CRITICAL")),
-            "orderNeeded": sum(1 for r in inv if r["orderRecommendation"] > 0),
-            "openAlerts": sum(1 for a in al if a["resolvedAt"] is None),
-        },
-        "inventory": inv,
-        "alerts": al,
-    }
+    return {"asOf": D.TODAY, **d}
