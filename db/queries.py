@@ -121,6 +121,14 @@ def summary_for_institution(institution_id: str) -> dict:
     return _summaries_for([institution_id]).get(institution_id, empty)
 
 
+def summaries_for_many(institution_ids: list) -> dict:
+    """institution_id -> summary(dict) 일괄 조회, 결과에 없는 id 는 빈 요약으로 채운다
+    (GraphQL DataLoader 는 입력 키 개수만큼 결과가 필요하다)."""
+    empty = {"trackedItems": 0, "critical": 0, "belowRop": 0, "watch": 0, "orderNeeded": 0, "badge": _badge(0, 0, 0)}
+    found = _summaries_for(institution_ids)
+    return {iid: found.get(iid, empty) for iid in institution_ids}
+
+
 def facilities(category=None, sido=None, sigungu=None, q=None, limit=300) -> dict:
     all_items = list_institutions(category=category, sido=sido, sigungu=sigungu, q=q)
     total = len(all_items)
@@ -145,6 +153,32 @@ def inventory_for(institution_id: str) -> list:
             (institution_id,),
         )
         return [_inv_row(r) for r in cur.fetchall()]
+
+
+def inventory_for_many(institution_ids: list) -> dict:
+    """institution_id -> [InventoryItem-dict, ...] 일괄 조회 (GraphQL DataLoader 배치용, N+1 방지).
+
+    institutions { ... inventory { ... } } 처럼 목록 안에서 여러 기관에 대해
+    동시에 요청되면, 기관마다 따로 조회하는 대신 이 함수로 한 번에 가져온다."""
+    if not institution_ids:
+        return {}
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT inv.institution_id, inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
+                   inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
+                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status
+            FROM inventory inv JOIN standard_items si ON si.standard_code = inv.standard_code
+            WHERE inv.institution_id = ANY(%s)
+            ORDER BY inv.institution_id, si.standard_code
+            """,
+            (institution_ids,),
+        )
+        rows = cur.fetchall()
+    out = {iid: [] for iid in institution_ids}
+    for r in rows:
+        out.setdefault(r["institution_id"], []).append(_inv_row(r))
+    return out
 
 
 def facility_detail(institution_id: str):

@@ -7,20 +7,46 @@ REST(routers/wep_stock.py)와 동일 쿼리 레이어를 공유하므로 두 API
 파이프라인이 없어 시드 데이터(wep_data.py)를 그대로 쓴다.
 
 목록/상세로 나뉘어 있던 REST 를 GraphQL 에선 하나의 타입 + 중첩 필드로 통합했다
-(예: Institution.inventory, Institution.summary). 단, 이 중첩 필드는 상위
-institutions() 목록 안에서 여러 기관에 대해 동시에 요청되면 기관 수만큼 별도
-DB 조회가 발생한다(N+1) — 배치 로더는 이후 과제로 남겨둔다.
+(예: Institution.inventory, Institution.summary). institutions() 목록 안에서
+여러 기관에 대해 이 중첩 필드가 동시에 요청되면(N+1 상황) DataLoader
+(institution_inventory_loader/institution_summary_loader, api/index.py 의
+context_getter 로 요청마다 새로 만들어짐)가 같은 이벤트 루프 틱 안의 개별
+.load() 호출들을 모아 기관 수와 무관하게 단 한 번의 배치 SQL로 묶어서 조회한다.
 
 `dashboardInstitution` 은 이전엔 구식 8개 기관 샘플만 지원했으나, 이번에 전국
 3,598개 기관 전체를 지원하도록 실데이터로 전환했다.
 """
+import asyncio
 from typing import List, Optional
 
 import strawberry
+from strawberry.dataloader import DataLoader
 from strawberry.scalars import JSON
+from strawberry.types import Info
 
 from . import wep_data as D
 from db import queries as DB
+
+
+async def batch_load_inventory(institution_ids: List[str]) -> List[List["InventoryItem"]]:
+    """DataLoader 배치 함수 — institution_ids 전체를 한 번의 SQL로 조회.
+    동기 psycopg 호출은 이벤트 루프를 막지 않도록 스레드에서 실행한다."""
+    data = await asyncio.to_thread(DB.inventory_for_many, list(institution_ids))
+    return [[_to_inventory_item(r) for r in data.get(iid, [])] for iid in institution_ids]
+
+
+async def batch_load_summary(institution_ids: List[str]) -> List["FacilitySummary"]:
+    data = await asyncio.to_thread(DB.summaries_for_many, list(institution_ids))
+    return [_to_summary(data[iid]) for iid in institution_ids]
+
+
+async def get_context() -> dict:
+    """GraphQL 요청마다 새 DataLoader 세트를 만든다 — 서버리스라 요청 간 상태를
+    공유하지 않고, 같은 요청 안에서만 배치가 이뤄지면 충분하다."""
+    return {
+        "institution_inventory_loader": DataLoader(load_fn=batch_load_inventory),
+        "institution_summary_loader": DataLoader(load_fn=batch_load_summary),
+    }
 
 
 # ============================================================
@@ -95,13 +121,13 @@ class Institution:
     sigungu: str
     island: bool
 
-    @strawberry.field(description="이 기관의 품목별 재고 목록 (기관 조회와 한 번에 가져올 수 있음)")
-    def inventory(self) -> List[InventoryItem]:
-        return [_to_inventory_item(r) for r in DB.inventory_for(self.id)]
+    @strawberry.field(description="이 기관의 품목별 재고 목록 (여러 기관에 대해 동시 요청되면 DataLoader 로 배치 조회)")
+    async def inventory(self, info: Info) -> List[InventoryItem]:
+        return await info.context["institution_inventory_loader"].load(self.id)
 
-    @strawberry.field(description="재고 상태 요약 + 배지 (긴급/주의/관찰/정상)")
-    def summary(self) -> FacilitySummary:
-        return _to_summary(DB.summary_for_institution(self.id))
+    @strawberry.field(description="재고 상태 요약 + 배지 (긴급/주의/관찰/정상, DataLoader 배치 조회)")
+    async def summary(self, info: Info) -> FacilitySummary:
+        return await info.context["institution_summary_loader"].load(self.id)
 
 
 def _to_institution(inst: dict) -> Institution:
