@@ -1,15 +1,18 @@
 """GraphQL 레이어 — REST(routers/wep_stock.py)와 병행 제공, 전체 리소스 커버.
 
 사업수행계획서 4.3.2 "백엔드: 기본 재고량 조회 REST/JSON API + GraphQL" 대응.
-REST가 이미 쓰는 데이터 모듈(wep_data, wep_inventory)을 그대로 재사용하므로
-데이터는 REST와 100% 동일하다 — 차이는 조회 방식뿐이다. REST의 모든 리소스를
-1:1로 미러링하되, 목록/상세로 나뉘어 있던 것은 GraphQL에서 자연스럽게
-하나의 타입 + 중첩 필드로 통합했다(예: Institution.inventory, Institution.summary).
+기관(실데이터 3,598곳)·재고·알림은 Neon Postgres(db/queries.py)에서 조회한다 —
+REST(routers/wep_stock.py)와 동일 쿼리 레이어를 공유하므로 두 API의 값은 항상
+일치한다. 예측(B)/공급위험(C)/외부지표/인테이크/표준화검수/재배치는 아직 실
+파이프라인이 없어 시드 데이터(wep_data.py)를 그대로 쓴다.
 
-주의: `dashboardInstitution` 은 REST `/dashboard/institution/{id}` 와 동일하게
-구식 8개 기관 샘플(wep_data.INSTITUTIONS)만 지원한다. 전국 3,598개 기관 재고는
-`institution(id)`/`institutions(...)` 를 쓴다 — REST도 이 두 경로가 서로 다른
-데이터 소스를 쓰는 기존 구조를 그대로 미러링한 것이다.
+목록/상세로 나뉘어 있던 REST 를 GraphQL 에선 하나의 타입 + 중첩 필드로 통합했다
+(예: Institution.inventory, Institution.summary). 단, 이 중첩 필드는 상위
+institutions() 목록 안에서 여러 기관에 대해 동시에 요청되면 기관 수만큼 별도
+DB 조회가 발생한다(N+1) — 배치 로더는 이후 과제로 남겨둔다.
+
+`dashboardInstitution` 은 이전엔 구식 8개 기관 샘플만 지원했으나, 이번에 전국
+3,598개 기관 전체를 지원하도록 실데이터로 전환했다.
 """
 from typing import List, Optional
 
@@ -17,7 +20,7 @@ import strawberry
 from strawberry.scalars import JSON
 
 from . import wep_data as D
-from . import wep_inventory as INV
+from db import queries as DB
 
 
 # ============================================================
@@ -94,17 +97,11 @@ class Institution:
 
     @strawberry.field(description="이 기관의 품목별 재고 목록 (기관 조회와 한 번에 가져올 수 있음)")
     def inventory(self) -> List[InventoryItem]:
-        inst = INV.INST_BY_ID.get(self.id)
-        if not inst:
-            return []
-        return [_to_inventory_item(r) for r in INV.inventory_for(inst)]
+        return [_to_inventory_item(r) for r in DB.inventory_for(self.id)]
 
     @strawberry.field(description="재고 상태 요약 + 배지 (긴급/주의/관찰/정상)")
-    def summary(self) -> Optional[FacilitySummary]:
-        inst = INV.INST_BY_ID.get(self.id)
-        if not inst:
-            return None
-        return _to_summary(INV.summarize(inst))
+    def summary(self) -> FacilitySummary:
+        return _to_summary(DB.summary_for_institution(self.id))
 
 
 def _to_institution(inst: dict) -> Institution:
@@ -416,11 +413,11 @@ class Alert:
     evidence: JSON
 
 
-def _to_alert(a: dict, nm: dict) -> Alert:
+def _to_alert_db(a: dict) -> Alert:
+    """DB.alerts_list()/alert_one() 결과(institutionName 이미 조인됨) → Alert."""
     return Alert(
         alert_id=a["alertId"], alert_type=a["alertType"], severity=a["severity"], title=a["title"],
-        message=a["message"], institution_id=a.get("institutionId"),
-        institution_name=nm.get(a.get("institutionId")) if a.get("institutionId") else None,
+        message=a["message"], institution_id=a.get("institutionId"), institution_name=a.get("institutionName"),
         generated_at=a["generatedAt"], resolved_at=a.get("resolvedAt"), evidence=a.get("evidence") or {},
     )
 
@@ -493,16 +490,15 @@ class DashboardCentral:
     relocations: List[Relocation]
 
 
-@strawberry.type(description="기관 참조 (구식 8기관 샘플, REST dashboard/institution 전용)")
-class LegacyInstitutionRef:
+@strawberry.type(description="기관 참조 (REST dashboard/institution 전용 뷰)")
+class DashboardInstitutionRef:
     institution_id: str
     institution_name: str
     institution_type: str
-    region_code: str
     region_name: str
 
 
-@strawberry.type(description="기관 대시보드 요약 (구식 8기관 샘플)")
+@strawberry.type(description="기관 대시보드 요약")
 class InstitutionDashboardSummary:
     tracked_items: int
     below_rop: int
@@ -510,12 +506,12 @@ class InstitutionDashboardSummary:
     open_alerts: int
 
 
-@strawberry.type(description="기관 뷰 대시보드 (REST /dashboard/institution/{id}, 구식 8기관 샘플 전용)")
+@strawberry.type(description="기관 뷰 대시보드 (REST /dashboard/institution/{id}, 전국 3,598개 기관 전체 지원)")
 class DashboardInstitution:
     as_of: str
-    institution: LegacyInstitutionRef
+    institution: DashboardInstitutionRef
     summary: InstitutionDashboardSummary
-    inventory: List[InventoryPolicyDetail]
+    inventory: List[InventoryItem]
     alerts: List[Alert]
 
 
@@ -540,21 +536,21 @@ class Query:
         q: Optional[str] = None,
         limit: int = 50,
     ) -> List[Institution]:
-        items = INV._filtered(category=category, sido=sido, sigungu=sigungu, q=q)
+        items = DB.list_institutions(category=category, sido=sido, sigungu=sigungu, q=q)
         return [_to_institution(i) for i in items[:limit]]
 
     @strawberry.field(description="단일 기관 — inventory/summary 하위 필드까지 한 번의 쿼리로 조회 가능")
     def institution(self, id: str) -> Optional[Institution]:
-        inst = INV.INST_BY_ID.get(id)
+        inst = DB.get_institution(id)
         return _to_institution(inst) if inst else None
 
     @strawberry.field(description="기관유형 분류(보건소/보건지소/보건진료소)+개수")
     def facility_categories(self) -> List[FacilityCategory]:
-        return [FacilityCategory(category=c["category"], count=c["count"]) for c in INV.categories()]
+        return [FacilityCategory(category=c["category"], count=c["count"]) for c in DB.categories()]
 
     @strawberry.field(description="시도(또는 시군구) 목록+개수")
     def facility_regions(self, category: Optional[str] = None, sido: Optional[str] = None) -> List[RegionCount]:
-        r = INV.regions(category=category, sido=sido)
+        r = DB.regions(category=category, sido=sido)
         return [RegionCount(name=x["name"], count=x["count"]) for x in r["items"]]
 
     @strawberry.field(description="품목군 목록(+위험레벨)")
@@ -625,32 +621,25 @@ class Query:
         return _to_supply_risk(r, name)
 
     # ---- 모듈 D ----
-    @strawberry.field(description="SS/ROP·재고 현황 목록(주요 보건소 샘플)")
+    @strawberry.field(description="SS/ROP·재고 현황 목록(전국, 시급도순)")
     def inventory_policy(self, institution: Optional[str] = None, status: Optional[str] = None) -> List[InventoryPolicyRow]:
-        rows = INV.sample_inventory_rows()
-        if institution:
-            rows = [r for r in rows if r["institutionId"] == institution]
-        if status:
-            rows = [r for r in rows if r["status"] == status]
+        rows = DB.inventory_policy_rows(institution=institution, status=status)
         return [_to_policy_row(r) for r in rows]
 
-    @strawberry.field(description="단일 SS/ROP·근거·민감도 (구식 8기관 샘플)")
+    @strawberry.field(description="단일 SS/ROP·근거")
     def inventory_policy_one(self, institution_id: str, standard_code: str) -> Optional[InventoryPolicyDetail]:
-        for r in D.INVENTORY:
-            if r["institutionId"] == institution_id and r["standardCode"] == standard_code:
-                return _to_policy_detail(r)
+        for r in DB.inventory_policy_rows(institution=institution_id):
+            if r["standardCode"] == standard_code:
+                return _to_policy_detail({**r, "assumedLeadTime": True})
         return None
 
     @strawberry.field(description="발주 권고(수량·시점)")
     def order_recommendations(self, institution: Optional[str] = None) -> List[OrderRecommendation]:
-        rows = [r for r in INV.sample_inventory_rows() if r["orderRecommendation"] > 0]
-        if institution:
-            rows = [r for r in rows if r["institutionId"] == institution]
-        rows = sorted(rows, key=lambda r: r["orderRecommendation"], reverse=True)
+        rows = DB.order_recommendations(institution=institution)
         return [OrderRecommendation(
             institution_id=r["institutionId"], institution_name=r["institutionName"], standard_code=r["standardCode"],
             standard_name=r["standardName"], available=r["available"], rop=r["ROP"], target=r["target"],
-            recommended_qty=r["orderRecommendation"], uom=r["uom"], supply_risk_level=r["supplyRiskLevel"], status=r["status"],
+            recommended_qty=r["recommendedQty"], uom=r["uom"], supply_risk_level=r["supplyRiskLevel"], status=r["status"],
         ) for r in rows]
 
     @strawberry.field(description="재배치 제안 목록")
@@ -662,25 +651,13 @@ class Query:
     @strawberry.field(description="알림 목록 (severity/type/resolved/institution 필터)")
     def alerts(self, severity: Optional[str] = None, type: Optional[str] = None,
                resolved: Optional[bool] = None, institution: Optional[str] = None) -> List[Alert]:
-        rows = D.ALERTS
-        if severity:
-            rows = [a for a in rows if a["severity"] == severity]
-        if type:
-            rows = [a for a in rows if a["alertType"] == type]
-        if resolved is not None:
-            rows = [a for a in rows if (a["resolvedAt"] is not None) == resolved]
-        if institution:
-            rows = [a for a in rows if a.get("institutionId") == institution]
-        nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
-        return [_to_alert(a, nm) for a in rows]
+        rows = DB.alerts_list(severity=severity, alert_type=type, resolved=resolved, institution=institution)
+        return [_to_alert_db(a) for a in rows]
 
     @strawberry.field(description="알림 상세(근거 포함)")
     def alert(self, alert_id: str) -> Optional[Alert]:
-        nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
-        for a in D.ALERTS:
-            if a["alertId"] == alert_id:
-                return _to_alert(a, nm)
-        return None
+        a = DB.alert_one(alert_id)
+        return _to_alert_db(a) if a else None
 
     # ---- 외부지표 ----
     @strawberry.field(description="외부지표 시계열")
@@ -690,20 +667,16 @@ class Query:
     # ---- 대시보드 ----
     @strawberry.field(description="중앙 뷰 대시보드")
     def dashboard_central(self) -> DashboardCentral:
-        open_alerts = [a for a in D.ALERTS if a["resolvedAt"] is None]
+        open_alerts = DB.alerts_list(resolved=False)
         sev: dict = {}
         for a in open_alerts:
             sev[a["severity"]] = sev.get(a["severity"], 0) + 1
-        sample = INV.sample_inventory_rows()
-        shortage: dict = {}
-        nm: dict = {}
-        for r in sample:
-            nm[r["institutionId"]] = r["institutionName"]
-            if r["status"] in ("BELOW_ROP", "CRITICAL"):
-                shortage[r["institutionId"]] = shortage.get(r["institutionId"], 0) + 1
-        top_shortage = sorted(
-            [ShortageInstitution(institution_id=k, institution_name=nm.get(k), shortage_items=v) for k, v in shortage.items()],
-            key=lambda x: x.shortage_items, reverse=True)[:8]
+        core = DB.dashboard_central_summary()
+        top_shortage = [
+            ShortageInstitution(institution_id=s["institutionId"], institution_name=s["institutionName"],
+                                 shortage_items=s["shortageItems"])
+            for s in DB.top_shortage_institutions(8)
+        ]
         name = {g["itemGroupId"]: g["name"] for g in D.ITEM_GROUPS}
         risk_rank = sorted(
             [SupplyRiskRankItem(item_group_id=r["itemGroupId"], item_group_name=name.get(r["itemGroupId"]),
@@ -713,9 +686,9 @@ class Query:
         return DashboardCentral(
             as_of=D.TODAY,
             summary=CentralSummary(
-                institutions=len(INV.INSTITUTIONS), standard_items=len(D.STANDARD_ITEMS), item_groups=len(D.ITEM_GROUPS),
-                open_alerts=len(open_alerts), total_on_hand=sum(r["onHand"] for r in sample),
-                below_rop_items=sum(1 for r in sample if r["status"] in ("BELOW_ROP", "CRITICAL")),
+                institutions=core["institutions"], standard_items=len(D.STANDARD_ITEMS), item_groups=len(D.ITEM_GROUPS),
+                open_alerts=len(open_alerts), total_on_hand=core["totalOnHand"],
+                below_rop_items=core["belowRopItems"],
                 critical_risk_groups=sum(1 for r in D.SUPPLY_RISK if r["level"] == "CRITICAL"),
             ),
             alerts_by_severity=sev,
@@ -724,27 +697,24 @@ class Query:
             relocations=[_to_relocation(r, rel_nm) for r in D.RELOCATIONS],
         )
 
-    @strawberry.field(description="기관 뷰 대시보드 (구식 8기관 샘플 전용 — 전국 기관은 institution(id) 사용)")
+    @strawberry.field(description="기관 뷰 대시보드 (전국 3,598개 기관 전체 지원)")
     def dashboard_institution(self, institution_id: str) -> Optional[DashboardInstitution]:
-        inst = D.INST_BY_ID.get(institution_id)
-        if not inst:
+        d = DB.dashboard_institution(institution_id)
+        if not d:
             return None
-        inv = [r for r in D.INVENTORY if r["institutionId"] == institution_id]
-        al = [a for a in D.ALERTS if a.get("institutionId") == institution_id]
-        nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
+        inst = d["institution"]
         return DashboardInstitution(
             as_of=D.TODAY,
-            institution=LegacyInstitutionRef(
-                institution_id=inst["institutionId"], institution_name=inst["institutionName"],
-                institution_type=inst["institutionType"], region_code=inst["regionCode"], region_name=inst["regionName"],
+            institution=DashboardInstitutionRef(
+                institution_id=inst["id"], institution_name=inst["name"], institution_type=inst["type"],
+                region_name=f"{inst['sido']} {inst['sigungu']}",
             ),
             summary=InstitutionDashboardSummary(
-                tracked_items=len(inv), below_rop=sum(1 for r in inv if r["status"] in ("BELOW_ROP", "CRITICAL")),
-                order_needed=sum(1 for r in inv if r["orderRecommendation"] > 0),
-                open_alerts=sum(1 for a in al if a["resolvedAt"] is None),
+                tracked_items=d["summary"]["trackedItems"], below_rop=d["summary"]["belowRop"],
+                order_needed=d["summary"]["orderNeeded"], open_alerts=d["summary"]["openAlerts"],
             ),
-            inventory=[_to_policy_detail(r) for r in inv],
-            alerts=[_to_alert(a, nm) for a in al],
+            inventory=[_to_inventory_item(r) for r in d["inventory"]],
+            alerts=[_to_alert_db(a) for a in d["alerts"]],
         )
 
 

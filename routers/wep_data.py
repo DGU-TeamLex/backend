@@ -1,8 +1,10 @@
 """WeP-Stock 데모용 시드 데이터.
 
 명세(기능/데이터모델/API)에 맞춘 현실적인 의료물품 재고 도메인 데이터.
-서버리스 인메모리 — 영속되지 않음. 시연/검증용.
-실제 운영에서는 인테이크/표준화/예측/경보 파이프라인이 이 값들을 산출한다.
+기관(실데이터)·재고·알림은 이제 Neon Postgres(db/queries.py)로 이전됐다 —
+여기 남은 INSTITUTIONS(구식 8기관)는 RELOCATIONS(재배치, 범위 밖) 의
+발신/수신 기관명 조회용으로만 쓰인다. 예측(B)/공급위험(C)/외부지표/인테이크/
+표준화검수는 아직 실 파이프라인이 없어 서버리스 인메모리 시드값을 그대로 쓴다.
 """
 
 TODAY = "2026-06-29"
@@ -31,7 +33,7 @@ STANDARD_ITEMS = [
 ]
 ITEM_BY_CODE = {it["standardCode"]: it for it in STANDARD_ITEMS}
 
-# ---- 기관 (institution) ----
+# ---- 기관 (institution) — RELOCATIONS 발신/수신 기관명 조회 전용 (범위 밖 잔존) ----
 INSTITUTIONS = [
     {"institutionId": "inst_012", "institutionName": "강남구보건소", "institutionType": "HEALTH_CENTER", "regionCode": "11680", "regionName": "서울 강남구"},
     {"institutionId": "inst_023", "institutionName": "해운대구보건소", "institutionType": "HEALTH_CENTER", "regionCode": "26350", "regionName": "부산 해운대구"},
@@ -42,7 +44,6 @@ INSTITUTIONS = [
     {"institutionId": "inst_071", "institutionName": "남원읍보건지소", "institutionType": "BRANCH", "regionCode": "50130", "regionName": "제주 서귀포시"},
     {"institutionId": "inst_085", "institutionName": "신안군 도서진료소", "institutionType": "CLINIC", "regionCode": "46900", "regionName": "전남 신안군"},
 ]
-INST_BY_ID = {i["institutionId"]: i for i in INSTITUTIONS}
 
 # ---- 공급위험 (supply_risk) ----
 SUPPLY_RISK = [
@@ -63,111 +64,6 @@ SUPPLY_RISK = [
      "topContributors": [], "evidenceNews": []},
 ]
 RISK_BY_GROUP = {r["itemGroupId"]: r for r in SUPPLY_RISK}
-
-
-def _z_for_level(level):
-    return {"NORMAL": 1.28, "CAUTION": 1.65, "WARNING": 2.05, "CRITICAL": 2.33}.get(level, 1.28)
-
-
-# ---- 재고/적정재고 (inventory + inventory_policy) 생성 ----
-# (institution, code, on_hand, available, mu, sigma, base_lead)
-_INV_RAW = [
-    ("inst_012", "KD0192", 820, 800, 180.0, 52.0, 1.0),
-    ("inst_012", "KD0451", 38, 30, 60.0, 22.0, 1.2),
-    ("inst_012", "KD0820", 12, 9, 25.0, 11.0, 1.0),
-    ("inst_012", "KD1490", 1500, 1500, 800.0, 240.0, 1.0),
-    ("inst_012", "KD2570", 64, 58, 40.0, 18.0, 1.3),
-    ("inst_023", "KD0192", 90, 80, 150.0, 60.0, 1.1),
-    ("inst_023", "KD0820", 4, 2, 22.0, 12.0, 1.0),
-    ("inst_023", "KD1133", 210, 205, 90.0, 28.0, 1.0),
-    ("inst_031", "KD0451", 120, 118, 45.0, 15.0, 1.2),
-    ("inst_031", "KD2031", 30, 22, 35.0, 16.0, 1.4),
-    ("inst_044", "KD0192", 600, 590, 170.0, 48.0, 1.0),
-    ("inst_044", "KD2244", 8, 5, 18.0, 9.0, 1.5),
-    ("inst_058", "KD1490", 120, 110, 300.0, 130.0, 1.2),
-    ("inst_058", "KD0820", 60, 55, 20.0, 10.0, 1.1),
-    ("inst_066", "KD2570", 14, 9, 38.0, 17.0, 1.3),
-    ("inst_066", "KD3120", 300, 295, 80.0, 24.0, 1.0),
-    ("inst_071", "KD1133", 24, 20, 30.0, 14.0, 1.4),
-    ("inst_085", "KD0451", 6, 3, 12.0, 7.0, 1.8),
-    ("inst_085", "KD1490", 40, 35, 60.0, 30.0, 1.6),
-]
-
-
-def _build_inventory():
-    rows = []
-    for inst, code, on_hand, avail, mu, sigma, base_l in _INV_RAW:
-        item = ITEM_BY_CODE[code]
-        risk = RISK_BY_GROUP.get(item["itemGroupId"], {"level": "NORMAL"})
-        level = risk["level"]
-        z = _z_for_level(level)
-        l_mult = {"NORMAL": 1.0, "CAUTION": 1.1, "WARNING": 1.25, "CRITICAL": 1.5}.get(level, 1.0)
-        L = round(base_l * l_mult, 2)
-        ss = round(z * sigma * (L ** 0.5), 1)
-        rop = round(mu * L + ss, 1)
-        target = round(mu * (L + 1.0) + ss, 1)
-        inbound = 0
-        rec = max(0, round(target - avail - inbound))
-        if rec > 0:  # MOQ/포장단위 올림(10단위)
-            rec = int((rec + 9) // 10 * 10)
-        if avail < rop * 0.5:
-            status = "CRITICAL"
-        elif avail < rop:
-            status = "BELOW_ROP"
-        elif avail < rop * 1.3:
-            status = "WATCH"
-        else:
-            status = "OK"
-        rows.append({
-            "institutionId": inst,
-            "institutionName": INST_BY_ID[inst]["institutionName"],
-            "standardCode": code,
-            "standardName": item["standardName"],
-            "itemGroupId": item["itemGroupId"],
-            "criticality": item["criticality"],
-            "uom": item["uom"],
-            "onHand": on_hand,
-            "available": avail,
-            "mu": mu,
-            "sigma": sigma,
-            "leadTimeUsed": L,
-            "zUsed": z,
-            "SS": ss,
-            "ROP": rop,
-            "target": target,
-            "orderRecommendation": rec,
-            "supplyRiskLevel": level,
-            "status": status,
-            "assumedLeadTime": True,
-        })
-    return rows
-
-
-INVENTORY = _build_inventory()
-
-# ---- 알림 (alert) ----
-ALERTS = [
-    {"alertId": "al_5001", "alertType": "STOCK_BELOW_ROP", "severity": "CRITICAL", "institutionId": "inst_085", "standardCode": "KD0451",
-     "generatedAt": TODAY + "T08:12:00Z", "resolvedAt": None, "title": "수액세트 재고 미달(가용 3 < ROP)",
-     "message": "신안군 도서진료소 수액세트 가용재고가 재주문점 아래입니다. 리드타임 가정값(섬 지역) 적용.", "evidence": {"available": 3, "ROP": 16.2}},
-    {"alertId": "al_5002", "alertType": "STOCK_BELOW_ROP", "severity": "CRITICAL", "institutionId": "inst_023", "standardCode": "KD0820",
-     "generatedAt": TODAY + "T08:12:00Z", "resolvedAt": None, "title": "라텍스 장갑 재고 미달(가용 2)",
-     "message": "해운대구보건소 라텍스 검진장갑 가용재고가 위험 수준입니다.", "evidence": {"available": 2, "ROP": 16.0}},
-    {"alertId": "al_5003", "alertType": "SUPPLY_RISK", "severity": "CRITICAL", "institutionId": None, "itemGroupId": "ig_plastic_consumable",
-     "generatedAt": TODAY + "T07:00:00Z", "resolvedAt": None, "title": "플라스틱 소모품 공급위험 CRITICAL(82)",
-     "message": "나프타 급등·호르무즈 긴장 영향. 주사기/수액세트/카테터 선제 발주 권고. 선행 약 14일.", "evidence": {"riskScore": 82, "leadDays": 14}},
-    {"alertId": "al_5004", "alertType": "SUPPLY_RISK", "severity": "WARNING", "institutionId": None, "itemGroupId": "ig_rubber_latex",
-     "generatedAt": TODAY + "T07:00:00Z", "resolvedAt": None, "title": "고무·라텍스 공급위험 WARNING(64)",
-     "message": "천연고무 작황 부진. 라텍스 장갑 버퍼 상향 권고.", "evidence": {"riskScore": 64}},
-    {"alertId": "al_5005", "alertType": "STOCK_BELOW_ROP", "severity": "WARNING", "institutionId": "inst_044", "standardCode": "KD2244",
-     "generatedAt": TODAY + "T08:12:00Z", "resolvedAt": None, "title": "수술용 봉합사 재고 미달", "message": "유성구보건소 봉합사 가용 5.", "evidence": {"available": 5, "ROP": 14.0}},
-    {"alertId": "al_5006", "alertType": "EXPIRY", "severity": "WARNING", "institutionId": "inst_012", "standardCode": "KD0820",
-     "generatedAt": TODAY + "T06:30:00Z", "resolvedAt": None, "title": "라텍스 장갑 유효기간 임박(D-45)", "message": "강남구보건소 로트 LOT-0820-A FEFO 우선 소진 권고.", "evidence": {"daysToExpiry": 45, "lot": "LOT-0820-A"}},
-    {"alertId": "al_5007", "alertType": "STOCK_BELOW_ROP", "severity": "WARNING", "institutionId": "inst_066", "standardCode": "KD2570",
-     "generatedAt": TODAY + "T08:12:00Z", "resolvedAt": None, "title": "정맥 카테터 재고 미달", "message": "춘천시보건소 카테터 가용 9.", "evidence": {"available": 9, "ROP": 60.6}},
-    {"alertId": "al_5008", "alertType": "EXPIRY", "severity": "CAUTION", "institutionId": "inst_058", "standardCode": "KD1490",
-     "generatedAt": TODAY + "T06:30:00Z", "resolvedAt": TODAY + "T09:40:00Z", "title": "마스크 유효기간 임박(D-80)", "message": "완주군보건소 마스크 재배치 검토.", "evidence": {"daysToExpiry": 80}},
-]
 
 # ---- 재배치 제안 (relocation_suggestion) ----
 RELOCATIONS = [
