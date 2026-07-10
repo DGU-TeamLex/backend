@@ -32,15 +32,15 @@ DESCRIPTION = """
 
 TAGS_METADATA = [
     {"name": "인증·사용자", "description": "로그인(JWT)/내 프로필/역할(RBAC: CENTRAL·INSTITUTION)"},
-    {"name": "마스터", "description": "기관 · 표준품목 · 품목군"},
-    {"name": "데이터 인테이크", "description": "XLSX 업로드·검증·적재 배치 (R-EYKKES)"},
-    {"name": "모듈 A · 물품 표준화", "description": "표준코드 매핑 · 검수 큐"},
-    {"name": "모듈 B · 수요 예측", "description": "월 수요 분포(mean+분위수)·패턴분류"},
-    {"name": "모듈 C · 공급위험 경보", "description": "원자재·뉴스 기반 위험 점수/레벨/근거"},
-    {"name": "모듈 D · 적정재고·발주·재배치", "description": "SS/ROP · 발주권고 · 재배치 제안"},
-    {"name": "알림", "description": "재고미달·공급위험·유효기간임박"},
-    {"name": "외부지표", "description": "원자재 가격·뉴스리스크지수 등"},
-    {"name": "대시보드", "description": "중앙 뷰 · 기관 뷰"},
+    {"name": "마스터", "description": "기관(실데이터 3,598곳) · 표준품목(실데이터 17,148종, SSIS) · 품목군"},
+    {"name": "데이터 인테이크", "description": "적재 배치 이력(실데이터 — scripts/import_ssis_dataset.py 실행 기록)"},
+    {"name": "모듈 A · 물품 표준화", "description": "⚠️ MOCK — 표준코드 매핑 · 검수 큐 (실 매칭 엔진 없음, 데모 목업 고정값)"},
+    {"name": "모듈 B · 수요 예측", "description": "⚠️ MOCK — 월 수요 분포(mean+분위수)·패턴분류 (실 예측모델 없음, 데모 목업 고정값)"},
+    {"name": "모듈 C · 공급위험 경보", "description": "⚠️ MOCK — 원자재·뉴스 기반 위험 점수/레벨/근거 (실 외부연동 없음, 데모 목업 고정값)"},
+    {"name": "모듈 D · 적정재고·발주·재배치", "description": "SS/ROP·발주권고는 실데이터(SSIS) 기반. 재배치 제안만 ⚠️ MOCK(실 최적화 로직 없음)"},
+    {"name": "알림", "description": "재고미달(실데이터 기반) · 공급위험·유효기간임박은 모듈 C/미구현이라 해당 없음"},
+    {"name": "외부지표", "description": "⚠️ MOCK — 원자재 가격·뉴스리스크지수 등 (실 외부 API 연동 없음, 데모 목업 고정값)"},
+    {"name": "대시보드", "description": "중앙 뷰 · 기관 뷰 (재고 관련 수치는 실데이터, 공급위험 랭킹은 모듈 C MOCK 포함)"},
 ]
 
 app = FastAPI(

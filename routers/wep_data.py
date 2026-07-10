@@ -87,17 +87,8 @@ FORECASTS = {
         "dataQualityFlag": "ok"},
 }
 
-# ---- 적재 배치 (import_batch) ----
-IMPORTS = [
-    {"importBatchId": "ib_20260629_001", "fileName": "2026-06_보건소_통합.xlsx", "sourceVendor": "v_03", "status": "COMPLETED", "uploadedAt": TODAY + "T05:10:00Z",
-     "totalRows": 18420, "validRows": 18197, "errorRows": 223, "mappingRate": 0.967, "periodStart": "2026-06-01", "periodEnd": "2026-06-28"},
-    {"importBatchId": "ib_20260629_002", "fileName": "2026-06_의료용품_주간.xlsx", "sourceVendor": "v_01", "status": "LOADING", "uploadedAt": TODAY + "T08:40:00Z",
-     "totalRows": 5102, "validRows": 5090, "errorRows": 12, "mappingRate": 0.981, "periodStart": "2026-06-22", "periodEnd": "2026-06-28"},
-    {"importBatchId": "ib_20260628_004", "fileName": "2026-06_도서지역.xlsx", "sourceVendor": "v_07", "status": "VALIDATION_FAILED", "uploadedAt": "2026-06-28T14:02:00Z",
-     "totalRows": 980, "validRows": 0, "errorRows": 980, "mappingRate": 0.0, "periodStart": "2026-06-01", "periodEnd": "2026-06-27"},
-    {"importBatchId": "ib_20260627_003", "fileName": "2026-05_월간_전체.xlsx", "sourceVendor": "v_03", "status": "COMPLETED", "uploadedAt": "2026-06-27T03:00:00Z",
-     "totalRows": 17110, "validRows": 16980, "errorRows": 130, "mappingRate": 0.972, "periodStart": "2026-05-01", "periodEnd": "2026-05-31"},
-]
+# ---- 적재 배치(import_batch)는 더 이상 목업이 아니다 — db/queries.py:import_batches()
+# (실제 scripts/import_ssis_dataset.py 실행 이력, import_batches 테이블) 로 이전됨.
 
 # ---- 표준화 검수 큐 (standardization queue) ----
 STD_QUEUE = [
