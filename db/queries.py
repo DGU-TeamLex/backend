@@ -74,6 +74,20 @@ def get_institution(institution_id: str):
         return _inst_row(r) if r else None
 
 
+def _user_row(r: dict) -> dict:
+    return {
+        "id": r["id"], "email": r["email"], "passwordHash": r["password_hash"],
+        "name": r["name"], "role": r["role"], "institutionId": r["institution_id"],
+    }
+
+
+def get_user_by_email(email: str):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+        r = cur.fetchone()
+        return _user_row(r) if r else None
+
+
 def regions(category=None, sido=None) -> dict:
     where, params = _where(category=category, sido=sido)
     with get_conn() as conn, conn.cursor() as cur:

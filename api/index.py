@@ -31,7 +31,7 @@ DESCRIPTION = """
 """.strip()
 
 TAGS_METADATA = [
-    {"name": "인증·사용자", "description": "로그인/토큰/내 프로필 (데모 목업)"},
+    {"name": "인증·사용자", "description": "로그인(JWT)/내 프로필/역할(RBAC: CENTRAL·INSTITUTION)"},
     {"name": "마스터", "description": "기관 · 표준품목 · 품목군"},
     {"name": "데이터 인테이크", "description": "XLSX 업로드·검증·적재 배치 (R-EYKKES)"},
     {"name": "모듈 A · 물품 표준화", "description": "표준코드 매핑 · 검수 큐"},
