@@ -411,6 +411,38 @@ def import_batches(status=None) -> list:
     } for r in rows]
 
 
+def record_import_batch(import_batch_id, file_name, source_vendor=None,
+                        status="RECEIVED") -> dict:
+    """업로드 접수 배치를 기록한다(POST /imports, 이슈 #20).
+
+    실제 행 파싱·표준화 매칭 전 단계라 total/valid/error 행수는 0, mapping_rate 는
+    0.0 으로 남긴다. 후속 처리(매칭 엔진)가 같은 배치를 갱신하는 것을 전제로 한다.
+    반환 딕셔너리는 import_batches() 와 동일한 camelCase 계약을 따른다.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO import_batches
+                (import_batch_id, file_name, source_vendor, status,
+                 total_rows, valid_rows, error_rows, mapping_rate)
+            VALUES (%s, %s, %s, %s, 0, 0, 0, 0.0)
+            RETURNING import_batch_id, file_name, source_vendor, status,
+                      uploaded_at, total_rows, valid_rows, error_rows,
+                      mapping_rate, period_start, period_end
+            """,
+            [import_batch_id, file_name, source_vendor, status],
+        )
+        r = cur.fetchone()
+    return {
+        "importBatchId": r["import_batch_id"], "fileName": r["file_name"],
+        "sourceVendor": r["source_vendor"], "status": r["status"],
+        "uploadedAt": r["uploaded_at"].isoformat(), "totalRows": r["total_rows"],
+        "validRows": r["valid_rows"], "errorRows": r["error_rows"],
+        "mappingRate": r["mapping_rate"], "periodStart": r["period_start"],
+        "periodEnd": r["period_end"],
+    }
+
+
 def dashboard_institution(institution_id: str):
     inst = get_institution(institution_id)
     if not inst:
