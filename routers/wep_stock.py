@@ -9,9 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from . import wep_data as D
-from auth.deps import get_current_user
+from auth.deps import get_current_user, require_role
 from auth.security import ACCESS_TOKEN_EXPIRE_SECONDS, create_access_token, verify_password
 from db import queries as DB
+
+# 중앙(CENTRAL) 전용 — 전국 집계/마스터/모듈 A·B·C 데이터. INSTITUTION 계정은 자기
+# 기관 범위(아래 알림/기관 뷰 대시보드) 밖의 전국 데이터를 볼 권한이 없다.
+_central_only = Depends(require_role("CENTRAL"))
 
 router = APIRouter(prefix="/api/v1")
 
@@ -55,7 +59,7 @@ def me(current_user: dict = Depends(get_current_user)):
 # ===== 마스터 (기관: Postgres, 실데이터 3,598곳) =====
 @router.get("/institutions", tags=T_MASTER, summary="기관 목록(전국, 필터·페이지)")
 def institutions(sido: str | None = None, sigungu: str | None = None, category: str | None = None,
-                 q: str | None = None, page: int = 1, size: int = 50):
+                 q: str | None = None, page: int = 1, size: int = 50, _admin: dict = _central_only):
     items = DB.list_institutions(category=category, sido=sido, sigungu=sigungu, q=q)
     total = len(items)
     start = (page - 1) * size
@@ -65,23 +69,23 @@ def institutions(sido: str | None = None, sigungu: str | None = None, category: 
 
 # ===== 지역·유형 탐색 (이슈 #8: 지역별·기관유형별 재고 조회) =====
 @router.get("/facility-categories", tags=T_MASTER, summary="기관유형 분류(보건소/보건지소/보건진료소)+개수")
-def facility_categories():
+def facility_categories(_admin: dict = _central_only):
     return {"items": DB.categories()}
 
 
 @router.get("/facility-regions", tags=T_MASTER, summary="시도(또는 시군구) 목록+개수")
-def facility_regions(category: str | None = None, sido: str | None = None):
+def facility_regions(category: str | None = None, sido: str | None = None, _admin: dict = _central_only):
     return DB.regions(category=category, sido=sido)
 
 
 @router.get("/facilities", tags=T_MASTER, summary="기관 목록+상태요약(지역·유형 필터)")
 def facilities(category: str | None = None, sido: str | None = None, sigungu: str | None = None,
-               q: str | None = None, limit: int = Query(300, le=500)):
+               q: str | None = None, limit: int = Query(300, le=500), _admin: dict = _central_only):
     return DB.facilities(category=category, sido=sido, sigungu=sigungu, q=q, limit=limit)
 
 
 @router.get("/facilities/{institution_id}", tags=["대시보드"], summary="기관 상세+재고 현황")
-def facility_detail(institution_id: str):
+def facility_detail(institution_id: str, _admin: dict = _central_only):
     d = DB.facility_detail(institution_id)
     if not d:
         raise HTTPException(404, "institution not found")
@@ -89,7 +93,7 @@ def facility_detail(institution_id: str):
 
 
 @router.get("/item-groups", tags=T_MASTER, summary="품목군 목록(+위험레벨)")
-def item_groups():
+def item_groups(_admin: dict = _central_only):
     risk = {r["itemGroupId"]: r for r in D.SUPPLY_RISK}
     out = []
     for g in D.ITEM_GROUPS:
@@ -99,7 +103,7 @@ def item_groups():
 
 
 @router.get("/standard-items", tags=T_MASTER, summary="표준품목 마스터 검색")
-def standard_items(q: str | None = None, group: str | None = None):
+def standard_items(q: str | None = None, group: str | None = None, _admin: dict = _central_only):
     items = D.STANDARD_ITEMS
     if q:
         items = [i for i in items if q.lower() in i["standardName"].lower() or q.upper() in i["standardCode"]]
@@ -110,7 +114,7 @@ def standard_items(q: str | None = None, group: str | None = None):
 
 # ===== 데이터 인테이크 =====
 @router.get("/imports", tags=T_INTAKE, summary="적재 배치 목록")
-def imports(status: str | None = None):
+def imports(status: str | None = None, _admin: dict = _central_only):
     items = D.IMPORTS
     if status:
         items = [b for b in items if b["status"] == status]
@@ -119,7 +123,7 @@ def imports(status: str | None = None):
 
 # ===== 모듈 A — 물품 표준화 =====
 @router.get("/standardization/queue", tags=T_A, summary="표준화 검수 대기 큐")
-def std_queue(status: str | None = None):
+def std_queue(status: str | None = None, _admin: dict = _central_only):
     items = D.STD_QUEUE
     if status:
         items = [x for x in items if x["status"] == status]
@@ -128,7 +132,7 @@ def std_queue(status: str | None = None):
 
 # ===== 모듈 B — 수요 예측 =====
 @router.get("/forecasts", tags=T_B, summary="수요 예측 목록")
-def forecasts(institution: str | None = None):
+def forecasts(institution: str | None = None, _admin: dict = _central_only):
     items = list(D.FORECASTS.values())
     if institution:
         items = [f for f in items if f["institutionId"] == institution]
@@ -136,7 +140,7 @@ def forecasts(institution: str | None = None):
 
 
 @router.get("/forecasts/{institution_id}/{standard_code}", tags=T_B, summary="단일 수요 분포(mean+분위수)")
-def forecast_one(institution_id: str, standard_code: str):
+def forecast_one(institution_id: str, standard_code: str, _admin: dict = _central_only):
     f = D.FORECASTS.get((institution_id, standard_code))
     if not f:
         raise HTTPException(404, "forecast not found")
@@ -145,7 +149,7 @@ def forecast_one(institution_id: str, standard_code: str):
 
 # ===== 모듈 C — 공급위험 경보 =====
 @router.get("/supply-risk", tags=T_C, summary="품목군 공급위험 현황")
-def supply_risk(level: str | None = None):
+def supply_risk(level: str | None = None, _admin: dict = _central_only):
     items = D.SUPPLY_RISK
     if level:
         items = [r for r in items if r["level"] == level]
@@ -155,7 +159,7 @@ def supply_risk(level: str | None = None):
 
 
 @router.get("/supply-risk/{item_group_id}", tags=T_C, summary="품목군 위험 상세(근거 포함)")
-def supply_risk_one(item_group_id: str):
+def supply_risk_one(item_group_id: str, _admin: dict = _central_only):
     r = D.RISK_BY_GROUP.get(item_group_id)
     if not r:
         raise HTTPException(404, "item group risk not found")
@@ -164,13 +168,13 @@ def supply_risk_one(item_group_id: str):
 
 # ===== 모듈 D — 적정재고 / 발주 / 재배치 (Postgres) =====
 @router.get("/inventory-policy", tags=T_D, summary="SS/ROP·재고 현황 목록(전국, 시급도순)")
-def inventory_policy(institution: str | None = None, status: str | None = None):
+def inventory_policy(institution: str | None = None, status: str | None = None, _admin: dict = _central_only):
     rows = DB.inventory_policy_rows(institution=institution, status=status)
     return {"items": rows, "totalElements": len(rows)}
 
 
 @router.get("/inventory-policy/{institution_id}/{standard_code}", tags=T_D, summary="단일 SS/ROP·근거")
-def inventory_policy_one(institution_id: str, standard_code: str):
+def inventory_policy_one(institution_id: str, standard_code: str, _admin: dict = _central_only):
     rows = DB.inventory_policy_rows(institution=institution_id)
     for r in rows:
         if r["standardCode"] == standard_code:
@@ -179,13 +183,13 @@ def inventory_policy_one(institution_id: str, standard_code: str):
 
 
 @router.get("/order-recommendations", tags=T_D, summary="발주 권고(수량·시점)")
-def order_recommendations(institution: str | None = None):
+def order_recommendations(institution: str | None = None, _admin: dict = _central_only):
     rows = DB.order_recommendations(institution=institution)
     return {"items": rows, "totalElements": len(rows)}
 
 
 @router.get("/relocations", tags=T_D, summary="재배치 제안 목록")
-def relocations():
+def relocations(_admin: dict = _central_only):
     nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
     out = [{**r, "fromName": nm.get(r["fromInstitution"]), "toName": nm.get(r["toInstitution"]),
             "standardName": D.ITEM_BY_CODE.get(r["standardCode"], {}).get("standardName", r["standardCode"])}
@@ -193,30 +197,35 @@ def relocations():
     return {"items": out, "totalElements": len(out)}
 
 
-# ===== 알림 (Postgres) =====
+# ===== 알림 (Postgres) — INSTITUTION 은 자기 기관 알림만 =====
 @router.get("/alerts", tags=T_ALERT, summary="알림 목록")
-def alerts(severity: str | None = None, type: str | None = None, resolved: bool | None = None, institution: str | None = None):
+def alerts(severity: str | None = None, type: str | None = None, resolved: bool | None = None,
+           institution: str | None = None, current_user: dict = Depends(require_role("CENTRAL", "INSTITUTION"))):
+    if current_user["role"] == "INSTITUTION":
+        institution = current_user["institutionId"]
     rows = DB.alerts_list(severity=severity, alert_type=type, resolved=resolved, institution=institution)
     return {"items": rows, "totalElements": len(rows)}
 
 
 @router.get("/alerts/{alert_id}", tags=T_ALERT, summary="알림 상세(근거 포함)")
-def alert_one(alert_id: str):
+def alert_one(alert_id: str, current_user: dict = Depends(require_role("CENTRAL", "INSTITUTION"))):
     a = DB.alert_one(alert_id)
     if not a:
         raise HTTPException(404, "alert not found")
+    if current_user["role"] == "INSTITUTION" and a.get("institutionId") != current_user["institutionId"]:
+        raise HTTPException(403, "권한이 없습니다.")
     return a
 
 
 # ===== 외부지표 =====
 @router.get("/external-indicators", tags=T_EXT, summary="외부지표 시계열")
-def external_indicators():
+def external_indicators(_admin: dict = _central_only):
     return {"items": D.EXTERNAL_INDICATORS, "totalElements": len(D.EXTERNAL_INDICATORS)}
 
 
 # ===== 대시보드 (Postgres 집계) =====
 @router.get("/dashboard/central", tags=T_DASH, summary="중앙 뷰 대시보드")
-def dashboard_central():
+def dashboard_central(_admin: dict = _central_only):
     open_alerts = DB.alerts_list(resolved=False)
     sev = {}
     for a in open_alerts:
@@ -253,7 +262,9 @@ def _relocations_enriched():
 
 
 @router.get("/dashboard/institution/{institution_id}", tags=T_DASH, summary="기관 뷰 대시보드")
-def dashboard_institution(institution_id: str):
+def dashboard_institution(institution_id: str, current_user: dict = Depends(require_role("CENTRAL", "INSTITUTION"))):
+    if current_user["role"] == "INSTITUTION" and institution_id != current_user["institutionId"]:
+        raise HTTPException(403, "권한이 없습니다.")
     d = DB.dashboard_institution(institution_id)
     if not d:
         raise HTTPException(404, "institution not found")
