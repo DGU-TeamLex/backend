@@ -178,7 +178,7 @@ class StandardItem:
     standard_name: str
     item_group_id: str
     uom: str
-    shelf_life_days: int
+    shelf_life_days: Optional[int]
     criticality: str
 
 
@@ -597,23 +597,15 @@ class Query:
         r = DB.regions(category=category, sido=sido)
         return [RegionCount(name=x["name"], count=x["count"]) for x in r["items"]]
 
-    @strawberry.field(description="품목군 목록(+위험레벨)")
+    @strawberry.field(description="품목군 목록(실데이터, SSIS 물품 입출고 이력 기반)")
     def item_groups(self) -> List[ItemGroup]:
-        risk = {r["itemGroupId"]: r for r in D.SUPPLY_RISK}
-        out = []
-        for g in D.ITEM_GROUPS:
-            r = risk.get(g["itemGroupId"], {})
-            out.append(ItemGroup(item_group_id=g["itemGroupId"], name=g["name"],
-                                  risk_level=r.get("level", "NORMAL"), risk_score=r.get("riskScore", 0)))
-        return out
+        # riskLevel/riskScore 는 실제 품목군별 공급위험 데이터가 없어 NORMAL/0 고정
+        return [ItemGroup(item_group_id=g["itemGroupId"], name=g["name"], risk_level="NORMAL", risk_score=0)
+                for g in DB.item_groups()]
 
-    @strawberry.field(description="표준품목 마스터 검색")
+    @strawberry.field(description="표준품목 마스터 검색(실데이터, 17,148종)")
     def standard_items(self, q: Optional[str] = None, group: Optional[str] = None) -> List[StandardItem]:
-        items = D.STANDARD_ITEMS
-        if q:
-            items = [i for i in items if q.lower() in i["standardName"].lower() or q.upper() in i["standardCode"]]
-        if group:
-            items = [i for i in items if i["itemGroupId"] == group]
+        items = DB.standard_items(q=q, group=group)
         return [StandardItem(standard_item_id=i["standardItemId"], standard_code=i["standardCode"],
                               standard_name=i["standardName"], item_group_id=i["itemGroupId"], uom=i["uom"],
                               shelf_life_days=i["shelfLifeDays"], criticality=i["criticality"]) for i in items]
@@ -730,7 +722,7 @@ class Query:
         return DashboardCentral(
             as_of=D.TODAY,
             summary=CentralSummary(
-                institutions=core["institutions"], standard_items=len(D.STANDARD_ITEMS), item_groups=len(D.ITEM_GROUPS),
+                institutions=core["institutions"], standard_items=core["standardItems"], item_groups=core["itemGroups"],
                 open_alerts=len(open_alerts), total_on_hand=core["totalOnHand"],
                 below_rop_items=core["belowRopItems"],
                 critical_risk_groups=sum(1 for r in D.SUPPLY_RISK if r["level"] == "CRITICAL"),
