@@ -394,6 +394,23 @@ def _alert_row(r: dict) -> dict:
     }
 
 
+def import_batches(status=None) -> list:
+    where = " WHERE status = %s" if status else ""
+    params = [status] if status else []
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT * FROM import_batches{where} ORDER BY uploaded_at DESC",
+            params,
+        )
+        rows = cur.fetchall()
+    return [{
+        "importBatchId": r["import_batch_id"], "fileName": r["file_name"], "sourceVendor": r["source_vendor"],
+        "status": r["status"], "uploadedAt": r["uploaded_at"].isoformat(), "totalRows": r["total_rows"],
+        "validRows": r["valid_rows"], "errorRows": r["error_rows"], "mappingRate": r["mapping_rate"],
+        "periodStart": r["period_start"], "periodEnd": r["period_end"],
+    } for r in rows]
+
+
 def dashboard_institution(institution_id: str):
     inst = get_institution(institution_id)
     if not inst:

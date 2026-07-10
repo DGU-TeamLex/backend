@@ -96,6 +96,8 @@ def parse_and_aggregate():
     all_institutions = set()
     total_rows = 0
     bad_rows = 0
+    min_date = None
+    max_date = None
     t0 = time.time()
 
     for i in range(NUM_FILES):
@@ -129,6 +131,10 @@ def parse_and_aggregate():
                     item_price_n[item_code] = item_price_n.get(item_code, 0) + 1
 
                 all_institutions.add(inst_code)
+                if min_date is None or date < min_date:
+                    min_date = date
+                if max_date is None or date > max_date:
+                    max_date = date
 
                 key = (item_code, inst_code)
                 n = pair_n.get(key, 0) + 1
@@ -158,6 +164,10 @@ def parse_and_aggregate():
     return {
         "item_name": final_item_name,
         "item_avg_price": item_avg_price,
+        "total_rows": total_rows,
+        "bad_rows": bad_rows,
+        "min_date": min_date,
+        "max_date": max_date,
         "pair_n": pair_n,
         "pair_mean": pair_mean,
         "pair_M2": pair_M2,
@@ -285,6 +295,21 @@ def main():
                 )
                 n += 1
             print(f"alerts: {n-1}", flush=True)
+
+            print("recording import_batches entry (실제 적재 이력)...", flush=True)
+            valid_rows = agg["total_rows"] - agg["bad_rows"]
+            mapping_rate = round(len(code_to_real) / len(real_ids), 4) if real_ids else 0.0
+            batch_id = f"ib_ssis_{agg['min_date']}_{agg['max_date']}"
+            cur.execute(
+                "INSERT INTO import_batches (import_batch_id, file_name, source_vendor, status, total_rows, "
+                "valid_rows, error_rows, mapping_rate, period_start, period_end) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (import_batch_id) DO UPDATE SET total_rows=EXCLUDED.total_rows, "
+                "valid_rows=EXCLUDED.valid_rows, error_rows=EXCLUDED.error_rows, mapping_rate=EXCLUDED.mapping_rate",
+                (batch_id, "(한국사회보장정보원)_의료재고예측모델 개발 관련 데이터셋(물품재고_0~9).zip",
+                 "ssis.or.kr", "COMPLETED", agg["total_rows"], valid_rows, agg["bad_rows"], mapping_rate,
+                 agg["min_date"], agg["max_date"]),
+            )
+            print(f"import_batches: 1 (mapping_rate={mapping_rate})", flush=True)
 
         conn.commit()
     print("done.", flush=True)

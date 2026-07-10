@@ -610,16 +610,13 @@ class Query:
                               standard_name=i["standardName"], item_group_id=i["itemGroupId"], uom=i["uom"],
                               shelf_life_days=i["shelfLifeDays"], criticality=i["criticality"]) for i in items]
 
-    # ---- 데이터 인테이크 ----
-    @strawberry.field(description="적재 배치 목록")
+    # ---- 데이터 인테이크 (실데이터) ----
+    @strawberry.field(description="적재 배치 목록(실데이터)")
     def imports(self, status: Optional[str] = None) -> List[ImportBatch]:
-        items = D.IMPORTS
-        if status:
-            items = [b for b in items if b["status"] == status]
-        return [_to_import_batch(b) for b in items]
+        return [_to_import_batch(b) for b in DB.import_batches(status=status)]
 
     # ---- 모듈 A ----
-    @strawberry.field(description="표준화 검수 대기 큐")
+    @strawberry.field(description="[MOCK] 표준화 검수 대기 큐")
     def standardization_queue(self, status: Optional[str] = None) -> List[StandardizationQueueItem]:
         items = D.STD_QUEUE
         if status:
@@ -627,20 +624,20 @@ class Query:
         return [_to_queue_item(x) for x in items]
 
     # ---- 모듈 B ----
-    @strawberry.field(description="수요 예측 목록")
+    @strawberry.field(description="[MOCK] 수요 예측 목록")
     def forecasts(self, institution: Optional[str] = None) -> List[Forecast]:
         items = list(D.FORECASTS.values())
         if institution:
             items = [f for f in items if f["institutionId"] == institution]
         return [_to_forecast(f) for f in items]
 
-    @strawberry.field(description="단일 수요 분포(mean+분위수)")
+    @strawberry.field(description="[MOCK] 단일 수요 분포(mean+분위수)")
     def forecast(self, institution_id: str, standard_code: str) -> Optional[Forecast]:
         f = D.FORECASTS.get((institution_id, standard_code))
         return _to_forecast(f) if f else None
 
     # ---- 모듈 C ----
-    @strawberry.field(description="품목군 공급위험 현황 목록 (근거 포함)")
+    @strawberry.field(description="[MOCK] 품목군 공급위험 현황 목록 (근거 포함)")
     def supply_risk(self, level: Optional[str] = None) -> List[SupplyRisk]:
         items = D.SUPPLY_RISK
         if level:
@@ -648,7 +645,7 @@ class Query:
         name = {g["itemGroupId"]: g["name"] for g in D.ITEM_GROUPS}
         return [_to_supply_risk(r, name) for r in items]
 
-    @strawberry.field(description="품목군 위험 상세(근거 포함)")
+    @strawberry.field(description="[MOCK] 품목군 위험 상세(근거 포함)")
     def supply_risk_one(self, item_group_id: str) -> Optional[SupplyRisk]:
         r = D.RISK_BY_GROUP.get(item_group_id)
         if not r:
@@ -678,7 +675,7 @@ class Query:
             recommended_qty=r["recommendedQty"], uom=r["uom"], supply_risk_level=r["supplyRiskLevel"], status=r["status"],
         ) for r in rows]
 
-    @strawberry.field(description="재배치 제안 목록")
+    @strawberry.field(description="[MOCK] 재배치 제안 목록")
     def relocations(self) -> List[Relocation]:
         nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
         return [_to_relocation(r, nm) for r in D.RELOCATIONS]
@@ -696,7 +693,7 @@ class Query:
         return _to_alert_db(a) if a else None
 
     # ---- 외부지표 ----
-    @strawberry.field(description="외부지표 시계열")
+    @strawberry.field(description="[MOCK] 외부지표 시계열")
     def external_indicators(self) -> List[ExternalIndicator]:
         return [_to_indicator(i) for i in D.EXTERNAL_INDICATORS]
 

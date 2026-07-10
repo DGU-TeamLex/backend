@@ -73,6 +73,22 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
+-- 적재 배치 이력 (데이터 인테이크). scripts/import_ssis_dataset.py 등 실제
+-- 적재 스크립트가 실행될 때마다 이 테이블에 실행 기록을 남긴다(더 이상 목업 아님).
+CREATE TABLE IF NOT EXISTS import_batches (
+    import_batch_id TEXT PRIMARY KEY,
+    file_name TEXT NOT NULL,
+    source_vendor TEXT,
+    status TEXT NOT NULL,
+    uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    total_rows INTEGER NOT NULL,
+    valid_rows INTEGER NOT NULL,
+    error_rows INTEGER NOT NULL,
+    mapping_rate DOUBLE PRECISION NOT NULL,
+    period_start TEXT,
+    period_end TEXT
+);
+
 -- 알림 (재고미달 등). 재고 행 상태 변화로부터 파생되며, resolved_at 갱신이 실제 DB 상태로 남는다.
 CREATE TABLE IF NOT EXISTS alerts (
     alert_id TEXT PRIMARY KEY,

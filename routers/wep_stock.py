@@ -1,9 +1,10 @@
 """WeP-Stock — 전국 보건기관 의료물품 통합 재고관리 API (데모 구현).
 
-기관(전국 실데이터)·재고·알림은 Neon Postgres(db/queries.py)에서 조회한다.
-예측(B)/공급위험(C)/외부지표/인테이크/표준화검수/재배치는 아직 실 파이프라인이
-없어 시드 데이터(wep_data.py)를 그대로 쓴다. 엔드포인트는 명세 모듈별 태그로
-그룹화된다.
+기관·표준품목·품목군·재고·알림·적재이력은 Neon Postgres(db/queries.py)에서
+실데이터로 조회한다(SSIS 제공 실제 물품 입출고 데이터셋, scripts/import_ssis_dataset.py).
+예측(B)/공급위험(C)/외부지표/표준화검수/재배치는 아직 실 파이프라인이 없어
+시드 데이터(wep_data.py)를 그대로 쓴다 — 이 엔드포인트들은 summary 에
+"[MOCK]" 표시가 붙어 있다. 엔드포인트는 명세 모듈별 태그로 그룹화된다.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -106,17 +107,15 @@ def standard_items(q: str | None = None, group: str | None = None, _admin: dict 
     return {"items": items, "totalElements": len(items)}
 
 
-# ===== 데이터 인테이크 =====
-@router.get("/imports", tags=T_INTAKE, summary="적재 배치 목록")
+# ===== 데이터 인테이크 (실데이터 — scripts/import_ssis_dataset.py 실행 이력) =====
+@router.get("/imports", tags=T_INTAKE, summary="적재 배치 목록(실데이터)")
 def imports(status: str | None = None, _admin: dict = _central_only):
-    items = D.IMPORTS
-    if status:
-        items = [b for b in items if b["status"] == status]
+    items = DB.import_batches(status=status)
     return {"items": items, "totalElements": len(items)}
 
 
 # ===== 모듈 A — 물품 표준화 =====
-@router.get("/standardization/queue", tags=T_A, summary="표준화 검수 대기 큐")
+@router.get("/standardization/queue", tags=T_A, summary="[MOCK] 표준화 검수 대기 큐")
 def std_queue(status: str | None = None, _admin: dict = _central_only):
     items = D.STD_QUEUE
     if status:
@@ -125,7 +124,7 @@ def std_queue(status: str | None = None, _admin: dict = _central_only):
 
 
 # ===== 모듈 B — 수요 예측 =====
-@router.get("/forecasts", tags=T_B, summary="수요 예측 목록")
+@router.get("/forecasts", tags=T_B, summary="[MOCK] 수요 예측 목록")
 def forecasts(institution: str | None = None, _admin: dict = _central_only):
     items = list(D.FORECASTS.values())
     if institution:
@@ -133,7 +132,7 @@ def forecasts(institution: str | None = None, _admin: dict = _central_only):
     return {"items": items, "totalElements": len(items)}
 
 
-@router.get("/forecasts/{institution_id}/{standard_code}", tags=T_B, summary="단일 수요 분포(mean+분위수)")
+@router.get("/forecasts/{institution_id}/{standard_code}", tags=T_B, summary="[MOCK] 단일 수요 분포(mean+분위수)")
 def forecast_one(institution_id: str, standard_code: str, _admin: dict = _central_only):
     f = D.FORECASTS.get((institution_id, standard_code))
     if not f:
@@ -142,7 +141,7 @@ def forecast_one(institution_id: str, standard_code: str, _admin: dict = _centra
 
 
 # ===== 모듈 C — 공급위험 경보 =====
-@router.get("/supply-risk", tags=T_C, summary="품목군 공급위험 현황")
+@router.get("/supply-risk", tags=T_C, summary="[MOCK] 품목군 공급위험 현황")
 def supply_risk(level: str | None = None, _admin: dict = _central_only):
     items = D.SUPPLY_RISK
     if level:
@@ -152,7 +151,7 @@ def supply_risk(level: str | None = None, _admin: dict = _central_only):
     return {"items": items, "totalElements": len(items)}
 
 
-@router.get("/supply-risk/{item_group_id}", tags=T_C, summary="품목군 위험 상세(근거 포함)")
+@router.get("/supply-risk/{item_group_id}", tags=T_C, summary="[MOCK] 품목군 위험 상세(근거 포함)")
 def supply_risk_one(item_group_id: str, _admin: dict = _central_only):
     r = D.RISK_BY_GROUP.get(item_group_id)
     if not r:
@@ -182,7 +181,7 @@ def order_recommendations(institution: str | None = None, _admin: dict = _centra
     return {"items": rows, "totalElements": len(rows)}
 
 
-@router.get("/relocations", tags=T_D, summary="재배치 제안 목록")
+@router.get("/relocations", tags=T_D, summary="[MOCK] 재배치 제안 목록")
 def relocations(_admin: dict = _central_only):
     nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
     out = [{**r, "fromName": nm.get(r["fromInstitution"]), "toName": nm.get(r["toInstitution"]),
@@ -212,7 +211,7 @@ def alert_one(alert_id: str, current_user: dict = Depends(require_role("CENTRAL"
 
 
 # ===== 외부지표 =====
-@router.get("/external-indicators", tags=T_EXT, summary="외부지표 시계열")
+@router.get("/external-indicators", tags=T_EXT, summary="[MOCK] 외부지표 시계열")
 def external_indicators(_admin: dict = _central_only):
     return {"items": D.EXTERNAL_INDICATORS, "totalElements": len(D.EXTERNAL_INDICATORS)}
 
