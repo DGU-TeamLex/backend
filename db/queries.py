@@ -288,8 +288,42 @@ def dashboard_central_summary() -> dict:
             """
         )
         agg = cur.fetchone()
+        cur.execute("SELECT count(*) AS n FROM standard_items")
+        standard_items_n = cur.fetchone()["n"]
+        cur.execute("SELECT count(*) AS n FROM item_groups")
+        item_groups_n = cur.fetchone()["n"]
     return {"institutions": institutions_n, "totalOnHand": agg["total_on_hand"] or 0,
-            "belowRopItems": agg["below_rop_items"] or 0}
+            "belowRopItems": agg["below_rop_items"] or 0,
+            "standardItems": standard_items_n, "itemGroups": item_groups_n}
+
+
+def item_groups() -> list:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT item_group_id, name FROM item_groups ORDER BY name")
+        return [{"itemGroupId": r["item_group_id"], "name": r["name"]} for r in cur.fetchall()]
+
+
+def standard_items(q=None, group=None, limit=500) -> list:
+    where = []
+    params = []
+    if q:
+        where.append("(standard_name ILIKE %s OR standard_code ILIKE %s)")
+        params += [f"%{q}%", f"%{q}%"]
+    if group:
+        where.append("item_group_id = %s")
+        params.append(group)
+    clause = f" WHERE {' AND '.join(where)}" if where else ""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT standard_item_id, standard_code, standard_name, item_group_id, uom, "
+            f"shelf_life_days, criticality FROM standard_items{clause} ORDER BY standard_name LIMIT %s",
+            params + [limit],
+        )
+        return [{
+            "standardItemId": r["standard_item_id"], "standardCode": r["standard_code"],
+            "standardName": r["standard_name"], "itemGroupId": r["item_group_id"], "uom": r["uom"],
+            "shelfLifeDays": r["shelf_life_days"], "criticality": r["criticality"],
+        } for r in cur.fetchall()]
 
 
 def top_shortage_institutions(n=8) -> list:

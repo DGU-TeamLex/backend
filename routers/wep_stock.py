@@ -92,23 +92,17 @@ def facility_detail(institution_id: str, _admin: dict = _central_only):
     return d
 
 
-@router.get("/item-groups", tags=T_MASTER, summary="품목군 목록(+위험레벨)")
+@router.get("/item-groups", tags=T_MASTER, summary="품목군 목록(실데이터, SSIS 물품 입출고 이력 기반)")
 def item_groups(_admin: dict = _central_only):
-    risk = {r["itemGroupId"]: r for r in D.SUPPLY_RISK}
-    out = []
-    for g in D.ITEM_GROUPS:
-        r = risk.get(g["itemGroupId"], {})
-        out.append({**g, "riskLevel": r.get("level", "NORMAL"), "riskScore": r.get("riskScore", 0)})
+    # riskLevel/riskScore 는 실제 품목군별 공급위험 데이터가 없어 NORMAL/0 고정
+    # (모듈 C 공급위험은 별도 시드(D.SUPPLY_RISK)로 독립 운영 — routers/wep_data.py 참고)
+    out = [{**g, "riskLevel": "NORMAL", "riskScore": 0} for g in DB.item_groups()]
     return {"items": out, "totalElements": len(out)}
 
 
-@router.get("/standard-items", tags=T_MASTER, summary="표준품목 마스터 검색")
+@router.get("/standard-items", tags=T_MASTER, summary="표준품목 마스터 검색(실데이터, 17,148종)")
 def standard_items(q: str | None = None, group: str | None = None, _admin: dict = _central_only):
-    items = D.STANDARD_ITEMS
-    if q:
-        items = [i for i in items if q.lower() in i["standardName"].lower() or q.upper() in i["standardCode"]]
-    if group:
-        items = [i for i in items if i["itemGroupId"] == group]
+    items = DB.standard_items(q=q, group=group)
     return {"items": items, "totalElements": len(items)}
 
 
@@ -240,8 +234,8 @@ def dashboard_central(_admin: dict = _central_only):
         "asOf": D.TODAY,
         "summary": {
             "institutions": core["institutions"],
-            "standardItems": len(D.STANDARD_ITEMS),
-            "itemGroups": len(D.ITEM_GROUPS),
+            "standardItems": core["standardItems"],
+            "itemGroups": core["itemGroups"],
             "openAlerts": len(open_alerts),
             "totalOnHand": core["totalOnHand"],
             "belowRopItems": core["belowRopItems"],
