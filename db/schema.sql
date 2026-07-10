@@ -57,6 +57,22 @@ CREATE TABLE IF NOT EXISTS inventory (
 CREATE INDEX IF NOT EXISTS idx_inventory_institution ON inventory(institution_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_status ON inventory(status);
 
+-- 사용자 (인증/RBAC). 공개 가입 없음 — 관리자가 미리 생성(scripts/seed_users.py).
+-- role: CENTRAL(중앙관리자, 전 기관 조회) / INSTITUTION(개별 보건기관 담당자, institution_id 로 스코프)
+-- institution_id 는 의도적으로 FK 를 걸지 않는다 — scripts/seed_db.py 가 institutions 를
+-- 주기적으로 TRUNCATE ... CASCADE 로 재적재하는데(실데이터 갱신 시 재실행됨), FK 를 걸면
+-- 그 CASCADE 에 users 테이블까지 딸려가 계정이 통째로 삭제된다.
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL,
+    institution_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
 -- 알림 (재고미달 등). 재고 행 상태 변화로부터 파생되며, resolved_at 갱신이 실제 DB 상태로 남는다.
 CREATE TABLE IF NOT EXISTS alerts (
     alert_id TEXT PRIMARY KEY,

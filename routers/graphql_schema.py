@@ -19,12 +19,15 @@ context_getter 로 요청마다 새로 만들어짐)가 같은 이벤트 루프 
 import asyncio
 from typing import List, Optional
 
+import jwt
 import strawberry
+from fastapi import Request
 from strawberry.dataloader import DataLoader
 from strawberry.scalars import JSON
 from strawberry.types import Info
 
 from . import wep_data as D
+from auth.security import ACCESS_TOKEN_EXPIRE_SECONDS, create_access_token, decode_access_token, verify_password
 from db import queries as DB
 
 
@@ -40,12 +43,23 @@ async def batch_load_summary(institution_ids: List[str]) -> List["FacilitySummar
     return [_to_summary(data[iid]) for iid in institution_ids]
 
 
-async def get_context() -> dict:
+async def get_context(request: Request) -> dict:
     """GraphQL 요청마다 새 DataLoader 세트를 만든다 — 서버리스라 요청 간 상태를
-    공유하지 않고, 같은 요청 안에서만 배치가 이뤄지면 충분하다."""
+    공유하지 않고, 같은 요청 안에서만 배치가 이뤄지면 충분하다.
+
+    Authorization: Bearer <token> 이 있으면 디코딩해 current_user 로 컨텍스트에
+    싣는다(REST auth.deps.get_current_user 와 동일한 토큰 규격 공유)."""
+    current_user = None
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        try:
+            current_user = decode_access_token(auth_header.split(" ", 1)[1])
+        except jwt.PyJWTError:
+            current_user = None
     return {
         "institution_inventory_loader": DataLoader(load_fn=batch_load_inventory),
         "institution_summary_loader": DataLoader(load_fn=batch_load_summary),
+        "current_user": current_user,
     }
 
 
@@ -169,20 +183,21 @@ class StandardItem:
 
 
 # ============================================================
-# 인증 · 사용자 (데모 목업)
+# 인증 · 사용자 (JWT, RBAC)
 # ============================================================
 
-@strawberry.type(description="내 프로필·역할·소속 (데모 목업)")
+@strawberry.type(description="내 프로필·역할·소속")
 class Me:
     id: str
+    email: str
+    name: str
     role: str
     institution_id: Optional[str]
 
 
-@strawberry.type(description="로그인 응답 (데모 목업)")
+@strawberry.type(description="로그인 응답")
 class LoginResult:
     access_token: str
-    refresh_token: str
     expires_in: int
     user: Me
 
@@ -548,9 +563,12 @@ class DashboardInstitution:
 @strawberry.type
 class Query:
     # ---- 인증·사용자 ----
-    @strawberry.field(description="내 프로필·역할·소속 (데모 목업)")
-    def me(self, role: str = "CENTRAL", institution_id: Optional[str] = None) -> Me:
-        return Me(id="u_demo", role=role, institution_id=institution_id)
+    @strawberry.field(description="내 프로필·역할·소속 (Authorization: Bearer <token> 필요, 없으면 null)")
+    def me(self, info: Info) -> Optional[Me]:
+        u = info.context.get("current_user")
+        if not u:
+            return None
+        return Me(id=u["id"], email=u["email"], name=u["name"], role=u["role"], institution_id=u.get("institutionId"))
 
     # ---- 마스터 ----
     @strawberry.field(description="지역·기관유형별 기관 목록 (REST /facilities 와 동일 필터, 이슈 #8)")
@@ -745,16 +763,21 @@ class Query:
 
 
 # ============================================================
-# Mutation root (데모 목업 — 인증만)
+# Mutation root
 # ============================================================
 
 @strawberry.type
 class Mutation:
-    @strawberry.mutation(description="로그인(목업) — REST POST /auth/login 과 동일")
-    def login(self, role: str = "CENTRAL", institution_id: Optional[str] = None) -> LoginResult:
+    @strawberry.mutation(description="로그인 — REST POST /auth/login 과 동일 사용자/토큰 발급")
+    def login(self, email: str, password: str) -> LoginResult:
+        user = DB.get_user_by_email(email)
+        if not user or not verify_password(password, user["passwordHash"]):
+            raise Exception("이메일 또는 비밀번호가 올바르지 않습니다.")
+        token = create_access_token(user)
         return LoginResult(
-            access_token="demo.jwt.token", refresh_token="demo.refresh.token", expires_in=3600,
-            user=Me(id="u_demo", role=role, institution_id=institution_id),
+            access_token=token, expires_in=ACCESS_TOKEN_EXPIRE_SECONDS,
+            user=Me(id=user["id"], email=user["email"], name=user["name"], role=user["role"],
+                    institution_id=user.get("institutionId")),
         )
 
 

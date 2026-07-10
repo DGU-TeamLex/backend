@@ -5,9 +5,12 @@
 없어 시드 데이터(wep_data.py)를 그대로 쓴다. 엔드포인트는 명세 모듈별 태그로
 그룹화된다.
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from . import wep_data as D
+from auth.deps import get_current_user
+from auth.security import ACCESS_TOKEN_EXPIRE_SECONDS, create_access_token, verify_password
 from db import queries as DB
 
 router = APIRouter(prefix="/api/v1")
@@ -24,22 +27,29 @@ T_EXT = ["외부지표"]
 T_DASH = ["대시보드"]
 
 
-# ===== 인증 / 사용자 (데모: 목업) =====
-@router.post("/auth/login", tags=T_AUTH, summary="로그인(목업)")
-def login(body: dict):
-    role = (body or {}).get("role", "CENTRAL")
-    inst = (body or {}).get("institutionId")
+# ===== 인증 / 사용자 (JWT, RBAC) =====
+class LoginBody(BaseModel):
+    email: str
+    password: str
+
+
+@router.post("/auth/login", tags=T_AUTH, summary="로그인")
+def login(body: LoginBody):
+    user = DB.get_user_by_email(body.email)
+    if not user or not verify_password(body.password, user["passwordHash"]):
+        raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다.")
+    token = create_access_token(user)
     return {
-        "accessToken": "demo.jwt.token",
-        "refreshToken": "demo.refresh.token",
-        "expiresIn": 3600,
-        "user": {"id": "u_demo", "role": role, "institutionId": inst},
+        "accessToken": token,
+        "tokenType": "bearer",
+        "expiresIn": ACCESS_TOKEN_EXPIRE_SECONDS,
+        "user": {k: v for k, v in user.items() if k != "passwordHash"},
     }
 
 
 @router.get("/users/me", tags=T_AUTH, summary="내 프로필·역할·소속")
-def me(role: str = "CENTRAL", institutionId: str | None = None):
-    return {"id": "u_demo", "role": role, "institutionId": institutionId}
+def me(current_user: dict = Depends(get_current_user)):
+    return current_user
 
 
 # ===== 마스터 (기관: Postgres, 실데이터 3,598곳) =====
