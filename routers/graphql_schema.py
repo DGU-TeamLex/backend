@@ -3,8 +3,10 @@
 사업수행계획서 4.3.2 "백엔드: 기본 재고량 조회 REST/JSON API + GraphQL" 대응.
 기관(실데이터 3,598곳)·재고·알림은 Neon Postgres(db/queries.py)에서 조회한다 —
 REST(routers/wep_stock.py)와 동일 쿼리 레이어를 공유하므로 두 API의 값은 항상
-일치한다. 예측(B)/공급위험(C)/외부지표/인테이크/표준화검수/재배치는 아직 실
-파이프라인이 없어 시드 데이터(wep_data.py)를 그대로 쓴다.
+일치한다. 재배치(D)도 REST 와 동일한 엔진(routers/relocations_engine.py)을 공유해
+실데이터 재고 현황에서 부족↔여유 매칭으로 계산한다(이슈 #26). 예측(B)/공급위험(C)/
+외부지표/인테이크/표준화검수는 아직 실 파이프라인이 없어 시드 데이터(wep_data.py)를
+그대로 쓴다.
 
 목록/상세로 나뉘어 있던 REST 를 GraphQL 에선 하나의 타입 + 중첩 필드로 통합했다
 (예: Institution.inventory, Institution.summary). institutions() 목록 안에서
@@ -27,6 +29,7 @@ from strawberry.scalars import JSON
 from strawberry.types import Info
 
 from . import wep_data as D
+from .relocations_engine import compute_relocations
 from auth.security import ACCESS_TOKEN_EXPIRE_SECONDS, create_access_token, decode_access_token, verify_password
 from db import queries as DB
 
@@ -454,11 +457,16 @@ class Relocation:
     status: str
 
 
-def _to_relocation(r: dict, nm: dict) -> Relocation:
+def _to_relocation(r: dict, nm: dict | None = None) -> Relocation:
+    # compute_relocations() 는 fromName/toName/standardName 을 이미 채워 준다.
+    # nm(구식 기관명 맵)은 하위호환용 폴백일 뿐이다.
+    nm = nm or {}
     return Relocation(
-        id=r["id"], from_institution=r["fromInstitution"], from_name=nm.get(r["fromInstitution"]),
-        to_institution=r["toInstitution"], to_name=nm.get(r["toInstitution"]), standard_code=r["standardCode"],
-        standard_name=D.ITEM_BY_CODE.get(r["standardCode"], {}).get("standardName", r["standardCode"]),
+        id=r["id"], from_institution=r["fromInstitution"],
+        from_name=r.get("fromName") or nm.get(r["fromInstitution"]),
+        to_institution=r["toInstitution"], to_name=r.get("toName") or nm.get(r["toInstitution"]),
+        standard_code=r["standardCode"],
+        standard_name=r.get("standardName") or D.ITEM_BY_CODE.get(r["standardCode"], {}).get("standardName", r["standardCode"]),
         suggested_qty=r["suggestedQty"], reason=r["reason"], status=r["status"],
     )
 
@@ -718,11 +726,10 @@ class Query:
             recommended_qty=r["recommendedQty"], uom=r["uom"], supply_risk_level=r["supplyRiskLevel"], status=r["status"],
         ) for r in rows]
 
-    @strawberry.field(description="[MOCK] 재배치 제안 목록")
+    @strawberry.field(description="재배치 제안 목록(실데이터 부족↔여유 매칭)")
     def relocations(self, info: Info) -> List[Relocation]:
         _require_central(info)
-        nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
-        return [_to_relocation(r, nm) for r in D.RELOCATIONS]
+        return [_to_relocation(r) for r in compute_relocations()]
 
     # ---- 알림 ----
     @strawberry.field(description="알림 목록 (severity/type/resolved/institution 필터)")
@@ -771,7 +778,6 @@ class Query:
             [SupplyRiskRankItem(item_group_id=r["itemGroupId"], item_group_name=name.get(r["itemGroupId"]),
                                  risk_score=r["riskScore"], level=r["level"]) for r in D.SUPPLY_RISK],
             key=lambda x: x.risk_score, reverse=True)
-        rel_nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
         return DashboardCentral(
             as_of=D.TODAY,
             summary=CentralSummary(
@@ -783,7 +789,7 @@ class Query:
             alerts_by_severity=sev,
             supply_risk_ranking=risk_rank,
             top_shortage_institutions=top_shortage,
-            relocations=[_to_relocation(r, rel_nm) for r in D.RELOCATIONS],
+            relocations=[_to_relocation(r) for r in compute_relocations(limit=5)],
         )
 
     @strawberry.field(description="기관 뷰 대시보드 (전국 3,598개 기관 전체 지원)")

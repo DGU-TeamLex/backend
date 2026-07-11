@@ -2,14 +2,17 @@
 
 기관·표준품목·품목군·재고·알림·적재이력은 Neon Postgres(db/queries.py)에서
 실데이터로 조회한다(SSIS 제공 실제 물품 입출고 데이터셋, scripts/import_ssis_dataset.py).
-예측(B)/공급위험(C)/외부지표/표준화검수/재배치는 아직 실 파이프라인이 없어
-시드 데이터(wep_data.py)를 그대로 쓴다 — 이 엔드포인트들은 summary 에
-"[MOCK]" 표시가 붙어 있다. 엔드포인트는 명세 모듈별 태그로 그룹화된다.
+재배치(D)는 실데이터 재고 현황에서 부족↔여유 매칭으로 계산한다
+(routers/relocations_engine.py, 이슈 #26). 예측(B)/공급위험(C)/외부지표/표준화검수는
+아직 실 파이프라인이 없어 시드 데이터(wep_data.py)를 그대로 쓴다 — 이
+엔드포인트들은 summary 에 "[MOCK]" 표시가 붙어 있다. 엔드포인트는 명세 모듈별
+태그로 그룹화된다.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from . import wep_data as D
+from .relocations_engine import compute_relocations
 from auth.deps import get_current_user, require_role
 from auth.security import ACCESS_TOKEN_EXPIRE_SECONDS, create_access_token, verify_password
 from db import queries as DB
@@ -181,12 +184,9 @@ def order_recommendations(institution: str | None = None, _admin: dict = _centra
     return {"items": rows, "totalElements": len(rows)}
 
 
-@router.get("/relocations", tags=T_D, summary="[MOCK] 재배치 제안 목록")
+@router.get("/relocations", tags=T_D, summary="재배치 제안 목록(실데이터 부족↔여유 매칭)")
 def relocations(_admin: dict = _central_only):
-    nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
-    out = [{**r, "fromName": nm.get(r["fromInstitution"]), "toName": nm.get(r["toInstitution"]),
-            "standardName": D.ITEM_BY_CODE.get(r["standardCode"], {}).get("standardName", r["standardCode"])}
-           for r in D.RELOCATIONS]
+    out = compute_relocations()
     return {"items": out, "totalElements": len(out)}
 
 
@@ -243,15 +243,8 @@ def dashboard_central(_admin: dict = _central_only):
         "alertsBySeverity": sev,
         "supplyRiskRanking": risk_rank,
         "topShortageInstitutions": top_shortage,
-        "relocations": _relocations_enriched(),
+        "relocations": compute_relocations(limit=5),
     }
-
-
-def _relocations_enriched():
-    nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
-    return [{**r, "fromName": nm.get(r["fromInstitution"]), "toName": nm.get(r["toInstitution"]),
-             "standardName": D.ITEM_BY_CODE.get(r["standardCode"], {}).get("standardName", r["standardCode"])}
-            for r in D.RELOCATIONS]
 
 
 @router.get("/dashboard/institution/{institution_id}", tags=T_DASH, summary="기관 뷰 대시보드")
