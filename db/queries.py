@@ -303,7 +303,7 @@ def item_groups() -> list:
         return [{"itemGroupId": r["item_group_id"], "name": r["name"]} for r in cur.fetchall()]
 
 
-def standard_items(q=None, group=None, limit=500) -> list:
+def standard_items(q=None, group=None, limit=500, offset=0) -> list:
     where = []
     params = []
     if q:
@@ -316,14 +316,20 @@ def standard_items(q=None, group=None, limit=500) -> list:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"SELECT standard_item_id, standard_code, standard_name, item_group_id, uom, "
-            f"shelf_life_days, criticality FROM standard_items{clause} ORDER BY standard_name LIMIT %s",
-            params + [limit],
+            f"shelf_life_days, criticality FROM standard_items{clause} ORDER BY standard_name LIMIT %s OFFSET %s",
+            params + [limit, offset],
         )
-        return [{
-            "standardItemId": r["standard_item_id"], "standardCode": r["standard_code"],
-            "standardName": r["standard_name"], "itemGroupId": r["item_group_id"], "uom": r["uom"],
-            "shelfLifeDays": r["shelf_life_days"], "criticality": r["criticality"],
-        } for r in cur.fetchall()]
+        rows = cur.fetchall()
+        cur.execute(f"SELECT count(*) AS n FROM standard_items{clause}", params)
+        total = cur.fetchone()["n"]
+        return {
+            "items": [{
+                "standardItemId": r["standard_item_id"], "standardCode": r["standard_code"],
+                "standardName": r["standard_name"], "itemGroupId": r["item_group_id"], "uom": r["uom"],
+                "shelfLifeDays": r["shelf_life_days"], "criticality": r["criticality"],
+            } for r in rows],
+            "totalElements": total,
+        }
 
 
 def top_shortage_institutions(n=8) -> list:

@@ -102,9 +102,9 @@ def item_groups(_admin: dict = _central_only):
 
 
 @router.get("/standard-items", tags=T_MASTER, summary="표준품목 마스터 검색(실데이터, 17,148종)")
-def standard_items(q: str | None = None, group: str | None = None, _admin: dict = _central_only):
-    items = DB.standard_items(q=q, group=group)
-    return {"items": items, "totalElements": len(items)}
+def standard_items(q: str | None = None, group: str | None = None, limit: int = 500, offset: int = 0,
+                    _admin: dict = _central_only):
+    return DB.standard_items(q=q, group=group, limit=min(limit, 1000), offset=offset)
 
 
 # ===== 데이터 인테이크 (실데이터 — scripts/import_ssis_dataset.py 실행 이력) =====

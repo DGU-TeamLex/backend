@@ -637,12 +637,13 @@ class Query:
                 for g in DB.item_groups()]
 
     @strawberry.field(description="표준품목 마스터 검색(실데이터, 17,148종)")
-    def standard_items(self, info: Info, q: Optional[str] = None, group: Optional[str] = None) -> List[StandardItem]:
+    def standard_items(self, info: Info, q: Optional[str] = None, group: Optional[str] = None,
+                        limit: int = 500, offset: int = 0) -> List[StandardItem]:
         _require_central(info)
-        items = DB.standard_items(q=q, group=group)
+        r = DB.standard_items(q=q, group=group, limit=min(limit, 1000), offset=offset)
         return [StandardItem(standard_item_id=i["standardItemId"], standard_code=i["standardCode"],
                               standard_name=i["standardName"], item_group_id=i["itemGroupId"], uom=i["uom"],
-                              shelf_life_days=i["shelfLifeDays"], criticality=i["criticality"]) for i in items]
+                              shelf_life_days=i["shelfLifeDays"], criticality=i["criticality"]) for i in r["items"]]
 
     # ---- 데이터 인테이크 (실데이터) ----
     @strawberry.field(description="적재 배치 목록(실데이터)")
