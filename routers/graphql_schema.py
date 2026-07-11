@@ -64,6 +64,33 @@ async def get_context(request: Request) -> dict:
 
 
 # ============================================================
+# 인가 헬퍼 — REST(auth/deps.py)의 get_current_user/require_role 을 GraphQL
+# 컨텍스트(get_context 에서 세팅한 current_user) 기준으로 재사용한다. REST 와
+# 동일한 권한 규칙을 각 리졸버에 적용하기 위한 얇은 래퍼다(이슈 #18).
+#   - _require_login: 토큰 없으면 거부 (REST 401 대응)
+#   - _require_central: 로그인 + CENTRAL 역할만 통과 (REST require_role("CENTRAL") 대응)
+# INSTITUTION 스코프(자기 기관만) 검사는 각 리졸버에서 institutionId 로 개별 처리.
+# ============================================================
+
+class AuthError(Exception):
+    """GraphQL 인가 실패 — REST 의 401(미인증)/403(권한없음)에 대응."""
+
+
+def _require_login(info: Info) -> dict:
+    user = info.context.get("current_user")
+    if not user:
+        raise AuthError("인증 토큰이 필요합니다.")
+    return user
+
+
+def _require_central(info: Info) -> dict:
+    user = _require_login(info)
+    if user["role"] != "CENTRAL":
+        raise AuthError("권한이 없습니다.")
+    return user
+
+
+# ============================================================
 # 마스터 — 기관(실데이터 3,598곳) · 품목군 · 표준품목
 # ============================================================
 
@@ -574,37 +601,44 @@ class Query:
     @strawberry.field(description="지역·기관유형별 기관 목록 (REST /facilities 와 동일 필터, 이슈 #8)")
     def institutions(
         self,
+        info: Info,
         category: Optional[str] = None,
         sido: Optional[str] = None,
         sigungu: Optional[str] = None,
         q: Optional[str] = None,
         limit: int = 50,
     ) -> List[Institution]:
+        _require_central(info)
         items = DB.list_institutions(category=category, sido=sido, sigungu=sigungu, q=q)
         return [_to_institution(i) for i in items[:limit]]
 
     @strawberry.field(description="단일 기관 — inventory/summary 하위 필드까지 한 번의 쿼리로 조회 가능")
-    def institution(self, id: str) -> Optional[Institution]:
+    def institution(self, info: Info, id: str) -> Optional[Institution]:
+        _require_central(info)
         inst = DB.get_institution(id)
         return _to_institution(inst) if inst else None
 
     @strawberry.field(description="기관유형 분류(보건소/보건지소/보건진료소)+개수")
-    def facility_categories(self) -> List[FacilityCategory]:
+    def facility_categories(self, info: Info) -> List[FacilityCategory]:
+        _require_central(info)
         return [FacilityCategory(category=c["category"], count=c["count"]) for c in DB.categories()]
 
     @strawberry.field(description="시도(또는 시군구) 목록+개수")
-    def facility_regions(self, category: Optional[str] = None, sido: Optional[str] = None) -> List[RegionCount]:
+    def facility_regions(self, info: Info, category: Optional[str] = None, sido: Optional[str] = None) -> List[RegionCount]:
+        _require_central(info)
         r = DB.regions(category=category, sido=sido)
         return [RegionCount(name=x["name"], count=x["count"]) for x in r["items"]]
 
     @strawberry.field(description="품목군 목록(실데이터, SSIS 물품 입출고 이력 기반)")
-    def item_groups(self) -> List[ItemGroup]:
+    def item_groups(self, info: Info) -> List[ItemGroup]:
+        _require_central(info)
         # riskLevel/riskScore 는 실제 품목군별 공급위험 데이터가 없어 NORMAL/0 고정
         return [ItemGroup(item_group_id=g["itemGroupId"], name=g["name"], risk_level="NORMAL", risk_score=0)
                 for g in DB.item_groups()]
 
     @strawberry.field(description="표준품목 마스터 검색(실데이터, 17,148종)")
-    def standard_items(self, q: Optional[str] = None, group: Optional[str] = None) -> List[StandardItem]:
+    def standard_items(self, info: Info, q: Optional[str] = None, group: Optional[str] = None) -> List[StandardItem]:
+        _require_central(info)
         items = DB.standard_items(q=q, group=group)
         return [StandardItem(standard_item_id=i["standardItemId"], standard_code=i["standardCode"],
                               standard_name=i["standardName"], item_group_id=i["itemGroupId"], uom=i["uom"],
@@ -612,12 +646,14 @@ class Query:
 
     # ---- 데이터 인테이크 (실데이터) ----
     @strawberry.field(description="적재 배치 목록(실데이터)")
-    def imports(self, status: Optional[str] = None) -> List[ImportBatch]:
+    def imports(self, info: Info, status: Optional[str] = None) -> List[ImportBatch]:
+        _require_central(info)
         return [_to_import_batch(b) for b in DB.import_batches(status=status)]
 
     # ---- 모듈 A ----
     @strawberry.field(description="[MOCK] 표준화 검수 대기 큐")
-    def standardization_queue(self, status: Optional[str] = None) -> List[StandardizationQueueItem]:
+    def standardization_queue(self, info: Info, status: Optional[str] = None) -> List[StandardizationQueueItem]:
+        _require_central(info)
         items = D.STD_QUEUE
         if status:
             items = [x for x in items if x["status"] == status]
@@ -625,20 +661,23 @@ class Query:
 
     # ---- 모듈 B ----
     @strawberry.field(description="[MOCK] 수요 예측 목록")
-    def forecasts(self, institution: Optional[str] = None) -> List[Forecast]:
+    def forecasts(self, info: Info, institution: Optional[str] = None) -> List[Forecast]:
+        _require_central(info)
         items = list(D.FORECASTS.values())
         if institution:
             items = [f for f in items if f["institutionId"] == institution]
         return [_to_forecast(f) for f in items]
 
     @strawberry.field(description="[MOCK] 단일 수요 분포(mean+분위수)")
-    def forecast(self, institution_id: str, standard_code: str) -> Optional[Forecast]:
+    def forecast(self, info: Info, institution_id: str, standard_code: str) -> Optional[Forecast]:
+        _require_central(info)
         f = D.FORECASTS.get((institution_id, standard_code))
         return _to_forecast(f) if f else None
 
     # ---- 모듈 C ----
     @strawberry.field(description="[MOCK] 품목군 공급위험 현황 목록 (근거 포함)")
-    def supply_risk(self, level: Optional[str] = None) -> List[SupplyRisk]:
+    def supply_risk(self, info: Info, level: Optional[str] = None) -> List[SupplyRisk]:
+        _require_central(info)
         items = D.SUPPLY_RISK
         if level:
             items = [r for r in items if r["level"] == level]
@@ -646,7 +685,8 @@ class Query:
         return [_to_supply_risk(r, name) for r in items]
 
     @strawberry.field(description="[MOCK] 품목군 위험 상세(근거 포함)")
-    def supply_risk_one(self, item_group_id: str) -> Optional[SupplyRisk]:
+    def supply_risk_one(self, info: Info, item_group_id: str) -> Optional[SupplyRisk]:
+        _require_central(info)
         r = D.RISK_BY_GROUP.get(item_group_id)
         if not r:
             return None
@@ -655,19 +695,22 @@ class Query:
 
     # ---- 모듈 D ----
     @strawberry.field(description="SS/ROP·재고 현황 목록(전국, 시급도순)")
-    def inventory_policy(self, institution: Optional[str] = None, status: Optional[str] = None) -> List[InventoryPolicyRow]:
+    def inventory_policy(self, info: Info, institution: Optional[str] = None, status: Optional[str] = None) -> List[InventoryPolicyRow]:
+        _require_central(info)
         rows = DB.inventory_policy_rows(institution=institution, status=status)
         return [_to_policy_row(r) for r in rows]
 
     @strawberry.field(description="단일 SS/ROP·근거")
-    def inventory_policy_one(self, institution_id: str, standard_code: str) -> Optional[InventoryPolicyDetail]:
+    def inventory_policy_one(self, info: Info, institution_id: str, standard_code: str) -> Optional[InventoryPolicyDetail]:
+        _require_central(info)
         for r in DB.inventory_policy_rows(institution=institution_id):
             if r["standardCode"] == standard_code:
                 return _to_policy_detail({**r, "assumedLeadTime": True})
         return None
 
     @strawberry.field(description="발주 권고(수량·시점)")
-    def order_recommendations(self, institution: Optional[str] = None) -> List[OrderRecommendation]:
+    def order_recommendations(self, info: Info, institution: Optional[str] = None) -> List[OrderRecommendation]:
+        _require_central(info)
         rows = DB.order_recommendations(institution=institution)
         return [OrderRecommendation(
             institution_id=r["institutionId"], institution_name=r["institutionName"], standard_code=r["standardCode"],
@@ -676,30 +719,43 @@ class Query:
         ) for r in rows]
 
     @strawberry.field(description="[MOCK] 재배치 제안 목록")
-    def relocations(self) -> List[Relocation]:
+    def relocations(self, info: Info) -> List[Relocation]:
+        _require_central(info)
         nm = {i["institutionId"]: i["institutionName"] for i in D.INSTITUTIONS}
         return [_to_relocation(r, nm) for r in D.RELOCATIONS]
 
     # ---- 알림 ----
     @strawberry.field(description="알림 목록 (severity/type/resolved/institution 필터)")
-    def alerts(self, severity: Optional[str] = None, type: Optional[str] = None,
+    def alerts(self, info: Info, severity: Optional[str] = None, type: Optional[str] = None,
                resolved: Optional[bool] = None, institution: Optional[str] = None) -> List[Alert]:
+        user = _require_login(info)
+        # INSTITUTION 은 자기 기관 알림으로만 스코프 (REST /alerts 와 동일)
+        if user["role"] == "INSTITUTION":
+            institution = user["institutionId"]
         rows = DB.alerts_list(severity=severity, alert_type=type, resolved=resolved, institution=institution)
         return [_to_alert_db(a) for a in rows]
 
     @strawberry.field(description="알림 상세(근거 포함)")
-    def alert(self, alert_id: str) -> Optional[Alert]:
+    def alert(self, info: Info, alert_id: str) -> Optional[Alert]:
+        user = _require_login(info)
         a = DB.alert_one(alert_id)
-        return _to_alert_db(a) if a else None
+        if not a:
+            return None
+        # INSTITUTION 은 자기 기관 알림만 열람 가능 (REST /alerts/{id} 와 동일)
+        if user["role"] == "INSTITUTION" and a.get("institutionId") != user["institutionId"]:
+            raise AuthError("권한이 없습니다.")
+        return _to_alert_db(a)
 
     # ---- 외부지표 ----
     @strawberry.field(description="[MOCK] 외부지표 시계열")
-    def external_indicators(self) -> List[ExternalIndicator]:
+    def external_indicators(self, info: Info) -> List[ExternalIndicator]:
+        _require_central(info)
         return [_to_indicator(i) for i in D.EXTERNAL_INDICATORS]
 
     # ---- 대시보드 ----
     @strawberry.field(description="중앙 뷰 대시보드")
-    def dashboard_central(self) -> DashboardCentral:
+    def dashboard_central(self, info: Info) -> DashboardCentral:
+        _require_central(info)
         open_alerts = DB.alerts_list(resolved=False)
         sev: dict = {}
         for a in open_alerts:
@@ -731,7 +787,11 @@ class Query:
         )
 
     @strawberry.field(description="기관 뷰 대시보드 (전국 3,598개 기관 전체 지원)")
-    def dashboard_institution(self, institution_id: str) -> Optional[DashboardInstitution]:
+    def dashboard_institution(self, info: Info, institution_id: str) -> Optional[DashboardInstitution]:
+        user = _require_login(info)
+        # INSTITUTION 은 자기 기관 대시보드만 열람 가능 (REST /dashboard/institution/{id} 와 동일)
+        if user["role"] == "INSTITUTION" and institution_id != user["institutionId"]:
+            raise AuthError("권한이 없습니다.")
         d = DB.dashboard_institution(institution_id)
         if not d:
             return None
