@@ -51,7 +51,7 @@ def main():
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT standard_code FROM standard_items")
-            db_codes = {r["standard_code"] for r in cur.fetchall()}
+            db_codes = {r[0] for r in cur.fetchall()}
             unmapped = db_codes - set(code_to_cat.keys())
             if unmapped:
                 print(f"WARNING: {len(unmapped)} DB codes not covered by mapping — '미분류'로 처리", flush=True)
