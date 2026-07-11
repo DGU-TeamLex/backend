@@ -276,6 +276,67 @@ def order_recommendations(institution=None, limit=200) -> list:
     } for r in rows]
 
 
+def forecast_inputs(institution=None, limit=100) -> list:
+    """수요 예측(모듈 B) 입력행. `inventory` 의 실데이터 mu/sigma(일별 수요 평균·표준편차,
+    SSIS 실거래 이력 산출)를 품목×기관 단위로 조회한다. 기관 미지정 시 수요가 크고 시급한
+    상위 `limit`건(CRITICAL→BELOW_ROP→WATCH→OK, 그 안에서 mu 큰 순)을 반환한다 —
+    전국 (기관×품목) 조합은 수십만건이라 예측을 전부 반환하지 않고 우선순위 뷰로 자른다."""
+    clauses, params = [], []
+    if institution:
+        clauses.append("inv.institution_id = %s"); params.append(institution)
+    where = (" AND " + " AND ".join(clauses)) if clauses else ""
+    order_limit = "" if institution else " LIMIT %s"
+    if not institution:
+        params.append(limit)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT i.id AS institution_id, i.name AS institution_name,
+                   inv.standard_code, si.standard_name, si.item_group_id,
+                   inv.mu, inv.sigma, inv.status
+            FROM inventory inv
+            JOIN institutions i ON i.id = inv.institution_id
+            JOIN standard_items si ON si.standard_code = inv.standard_code
+            WHERE 1=1{where}
+            ORDER BY CASE inv.status WHEN 'CRITICAL' THEN 0 WHEN 'BELOW_ROP' THEN 1 WHEN 'WATCH' THEN 2 ELSE 3 END,
+                     inv.mu DESC, i.name, inv.standard_code
+            {order_limit}
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+    return [{
+        "institutionId": r["institution_id"], "institutionName": r["institution_name"],
+        "standardCode": r["standard_code"], "standardName": r["standard_name"],
+        "itemGroupId": r["item_group_id"], "mu": r["mu"], "sigma": r["sigma"], "status": r["status"],
+    } for r in rows]
+
+
+def forecast_input_one(institution_id: str, standard_code: str):
+    """단일 (기관,품목) 예측 입력행. 재고 행이 없으면 None."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT i.id AS institution_id, i.name AS institution_name,
+                   inv.standard_code, si.standard_name, si.item_group_id,
+                   inv.mu, inv.sigma, inv.status
+            FROM inventory inv
+            JOIN institutions i ON i.id = inv.institution_id
+            JOIN standard_items si ON si.standard_code = inv.standard_code
+            WHERE inv.institution_id = %s AND inv.standard_code = %s
+            """,
+            (institution_id, standard_code),
+        )
+        r = cur.fetchone()
+    if not r:
+        return None
+    return {
+        "institutionId": r["institution_id"], "institutionName": r["institution_name"],
+        "standardCode": r["standard_code"], "standardName": r["standard_name"],
+        "itemGroupId": r["item_group_id"], "mu": r["mu"], "sigma": r["sigma"], "status": r["status"],
+    }
+
+
 def dashboard_central_summary() -> dict:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) AS n FROM institutions")

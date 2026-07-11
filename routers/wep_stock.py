@@ -9,6 +9,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from . import demand_forecast as FC
 from . import wep_data as D
 from auth.deps import get_current_user, require_role
 from auth.security import ACCESS_TOKEN_EXPIRE_SECONDS, create_access_token, verify_password
@@ -123,21 +124,23 @@ def std_queue(status: str | None = None, _admin: dict = _central_only):
     return {"items": items, "totalElements": len(items)}
 
 
-# ===== 모듈 B — 수요 예측 =====
-@router.get("/forecasts", tags=T_B, summary="[MOCK] 수요 예측 목록")
-def forecasts(institution: str | None = None, _admin: dict = _central_only):
-    items = list(D.FORECASTS.values())
-    if institution:
-        items = [f for f in items if f["institutionId"] == institution]
+# ===== 모듈 B — 수요 예측 (실데이터: inventory mu/sigma 기반 월별 분포 예측) =====
+# 이전 고정 MOCK(D.FORECASTS 2건)을 배포 DB 실데이터로 대체. 산출 방식·데이터 제약은
+# routers/demand_forecast.py 참고(일별 원계열 부재로 집계통계 기반 분포 예측).
+@router.get("/forecasts", tags=T_B, summary="수요 예측 목록(실데이터, 월별 분포)")
+def forecasts(institution: str | None = None, limit: int = Query(100, ge=1, le=300),
+              _admin: dict = _central_only):
+    rows = DB.forecast_inputs(institution=institution, limit=limit)
+    items = FC.forecasts_for(rows)
     return {"items": items, "totalElements": len(items)}
 
 
-@router.get("/forecasts/{institution_id}/{standard_code}", tags=T_B, summary="[MOCK] 단일 수요 분포(mean+분위수)")
+@router.get("/forecasts/{institution_id}/{standard_code}", tags=T_B, summary="단일 수요 분포(mean+분위수, 실데이터)")
 def forecast_one(institution_id: str, standard_code: str, _admin: dict = _central_only):
-    f = D.FORECASTS.get((institution_id, standard_code))
-    if not f:
+    row = DB.forecast_input_one(institution_id, standard_code)
+    if not row:
         raise HTTPException(404, "forecast not found")
-    return f
+    return FC.forecast_for(row)
 
 
 # ===== 모듈 C — 공급위험 경보 =====

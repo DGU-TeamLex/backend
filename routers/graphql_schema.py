@@ -26,6 +26,7 @@ from strawberry.dataloader import DataLoader
 from strawberry.scalars import JSON
 from strawberry.types import Info
 
+from . import demand_forecast as FC
 from . import wep_data as D
 from auth.security import ACCESS_TOKEN_EXPIRE_SECONDS, create_access_token, decode_access_token, verify_password
 from db import queries as DB
@@ -659,20 +660,19 @@ class Query:
             items = [x for x in items if x["status"] == status]
         return [_to_queue_item(x) for x in items]
 
-    # ---- 모듈 B ----
-    @strawberry.field(description="[MOCK] 수요 예측 목록")
-    def forecasts(self, info: Info, institution: Optional[str] = None) -> List[Forecast]:
+    # ---- 모듈 B (실데이터: inventory mu/sigma 기반 월별 분포 예측) ----
+    @strawberry.field(description="수요 예측 목록(실데이터, 월별 분포)")
+    def forecasts(self, info: Info, institution: Optional[str] = None, limit: int = 100) -> List[Forecast]:
         _require_central(info)
-        items = list(D.FORECASTS.values())
-        if institution:
-            items = [f for f in items if f["institutionId"] == institution]
-        return [_to_forecast(f) for f in items]
+        limit = max(1, min(limit, 300))
+        rows = DB.forecast_inputs(institution=institution, limit=limit)
+        return [_to_forecast(f) for f in FC.forecasts_for(rows)]
 
-    @strawberry.field(description="[MOCK] 단일 수요 분포(mean+분위수)")
+    @strawberry.field(description="단일 수요 분포(mean+분위수, 실데이터)")
     def forecast(self, info: Info, institution_id: str, standard_code: str) -> Optional[Forecast]:
         _require_central(info)
-        f = D.FORECASTS.get((institution_id, standard_code))
-        return _to_forecast(f) if f else None
+        row = DB.forecast_input_one(institution_id, standard_code)
+        return _to_forecast(FC.forecast_for(row)) if row else None
 
     # ---- 모듈 C ----
     @strawberry.field(description="[MOCK] 품목군 공급위험 현황 목록 (근거 포함)")

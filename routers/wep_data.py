@@ -73,6 +73,8 @@ RELOCATIONS = [
 ]
 
 # ---- 수요예측 (demand_forecast_monthly) 샘플 ----
+# DEPRECATED(이슈 #21): /forecasts 는 이제 inventory mu/sigma 실데이터로 산출한다
+# (routers/demand_forecast.py). 아래 시드는 더 이상 참조되지 않는다 — 이력용으로만 남김.
 FORECASTS = {
     ("inst_012", "KD0451"): {"institutionId": "inst_012", "standardCode": "KD0451", "patternClass": "INTERMITTENT", "championModel": "SBA", "modelVersion": "b-2026.06",
         "horizon": [
