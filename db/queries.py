@@ -297,6 +297,45 @@ def dashboard_central_summary() -> dict:
             "standardItems": standard_items_n, "itemGroups": item_groups_n}
 
 
+def institution_item_codes(institution_id: str, standard_codes: list[str] | None = None) -> list:
+    """기관의 원본 물품코드 목록. standard_codes 를 주면 그 표준품목들만 필터링 —
+    기관별 예측/알림 결과(표준코드 기준)를 그 기관이 알아듣는 원본 코드로 되돌릴 때 사용.
+    """
+    where = ["institution_id = %s"]
+    params = [institution_id]
+    if standard_codes:
+        where.append("standard_code = ANY(%s)")
+        params.append(standard_codes)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT raw_item_code, raw_item_name, standard_code, code_type, updated_at "
+            f"FROM institution_item_codes WHERE {' AND '.join(where)} ORDER BY raw_item_code",
+            params,
+        )
+        return [{
+            "rawItemCode": r["raw_item_code"], "rawItemName": r["raw_item_name"],
+            "standardCode": r["standard_code"], "codeType": r["code_type"],
+            "updatedAt": r["updated_at"].isoformat(),
+        } for r in cur.fetchall()]
+
+
+def upsert_institution_item_code(institution_id: str, raw_item_code: str, raw_item_name: str,
+                                  standard_code: str, code_type: str) -> None:
+    """크로스워크 1건 upsert — 재적재 시 raw_item_name/standard_code/code_type 갱신 가능
+    (기관이 같은 코드를 다른 물품에 재사용하거나, 매칭 결과가 재작업되는 경우 대응)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO institution_item_codes "
+            "(institution_id, raw_item_code, raw_item_name, standard_code, code_type) "
+            "VALUES (%s,%s,%s,%s,%s) "
+            "ON CONFLICT (institution_id, raw_item_code) DO UPDATE SET "
+            "raw_item_name = EXCLUDED.raw_item_name, standard_code = EXCLUDED.standard_code, "
+            "code_type = EXCLUDED.code_type, updated_at = now()",
+            (institution_id, raw_item_code, raw_item_name, standard_code, code_type),
+        )
+        conn.commit()
+
+
 def item_groups() -> list:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT item_group_id, name FROM item_groups ORDER BY name")
