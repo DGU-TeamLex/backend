@@ -1,0 +1,16 @@
+{
+  "LAB_REAGENT": "검사시약",
+  "MED_ORAL": "내복약",
+  "RENTAL": "대여물품",
+  "UNCLASSIFIED": "미분류",
+  "DISINFECT": "소독·멸균",
+  "SUPPLEMENT": "영양제",
+  "MED_TOPICAL": "외용·패치",
+  "FUEL": "유류",
+  "MED_INJECT": "주사제",
+  "MED_SUPPLY": "치료재료·의료소모품",
+  "PROMO": "판촉·홍보물",
+  "WASTE": "폐기물",
+  "KM_HERB": "한방약초",
+  "KM_EXTRACT": "한방엑스제"
+}
