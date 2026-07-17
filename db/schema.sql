@@ -104,3 +104,36 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_institution ON alerts(institution_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_resolved ON alerts(resolved_at);
+
+-- ===== 메타코드 3축 (data 레포 PR#1: wep-stock-data-normalization) =====
+-- 원재료(무엇으로 만들었나) · 공급리스크(왜 위험한가) · 수요트리거(언제 튀나)
+CREATE TABLE IF NOT EXISTS material_meta_codes (
+    meta_code TEXT PRIMARY KEY,
+    category TEXT NOT NULL,              -- raw_material / raw_material_risk / demand_risk
+    description TEXT NOT NULL,
+    supply_stage TEXT,                   -- 원물/원광/정제·가공/합성/생물유래/제조부품
+    supply_stage_note TEXT,
+    stage_confidence TEXT                -- confirmed / assumed_synth / n/a
+);
+CREATE INDEX IF NOT EXISTS idx_mmc_category ON material_meta_codes(category);
+
+-- 표준품목 → 메타코드 매핑.
+-- 조인 키는 물품명(표준물품명) 이다 — 보건의료정보부 회의(2026-07-14) 결정사항:
+-- "USE 계열 코드는 보건소별로 일련번호를 각자 부여해 동일 코드에 다른 물품이 매핑되므로,
+--  물품코드를 무시하고 물품명 기준으로 정리한다". data 레포의 representative_item_id
+-- (ITEM_<hash>) 와 본 DB 의 standard_code 는 체계가 달라 ID 로는 조인되지 않는다.
+CREATE TABLE IF NOT EXISTS item_meta_map (
+    standard_code TEXT PRIMARY KEY REFERENCES standard_items(standard_code) ON DELETE CASCADE,
+    item_family_id TEXT,
+    standard_family_name TEXT,
+    family_basis TEXT,                   -- 근거 티어(공식표>괄호추출>웹검색>일반지식>미상)
+    supply_cluster_id TEXT,
+    raw_material_meta_code TEXT,         -- 다중코드는 ';' 구분
+    raw_material_risk_meta_code TEXT,
+    demand_risk_meta_code TEXT,
+    material_confidence TEXT,            -- identified / group_coarse / unspecified
+    activity_scope TEXT                  -- active_high / active_low / one_off
+);
+CREATE INDEX IF NOT EXISTS idx_imm_cluster ON item_meta_map(supply_cluster_id);
+CREATE INDEX IF NOT EXISTS idx_imm_conf ON item_meta_map(material_confidence);
+CREATE INDEX IF NOT EXISTS idx_imm_scope ON item_meta_map(activity_scope);
