@@ -185,10 +185,14 @@ def main():
                 np.where(out2["on_hand"] < rop, "BELOW_ROP",
                 np.where(out2["on_hand"] < rop * 1.2, "WATCH", "OK"))))
 
+        # Neon pooled(PgBouncer) 연결은 세션을 재사용하므로 이전 실행의 임시테이블이
+        # 남아있을 수 있다 → 선drop + ON COMMIT DROP 로 재실행 안전성 확보.
+        cur.execute("DROP TABLE IF EXISTS _fix")
         cur.execute("""CREATE TEMP TABLE _fix (institution_id TEXT, standard_code TEXT,
             mu DOUBLE PRECISION, sigma DOUBLE PRECISION, z_used DOUBLE PRECISION,
             lead_time_used DOUBLE PRECISION, ss DOUBLE PRECISION, rop DOUBLE PRECISION,
-            target DOUBLE PRECISION, order_recommendation INT, supply_risk_level TEXT, status TEXT)""")
+            target DOUBLE PRECISION, order_recommendation INT, supply_risk_level TEXT,
+            status TEXT) ON COMMIT DROP""")
         buf = io.StringIO()
         out2[["institution_id", "standard_code", "mu_", "sg_", "z_", "L_", "ss_", "rop_",
               "tgt_", "ord_", "level", "st_"]].to_csv(buf, index=False, header=False)
