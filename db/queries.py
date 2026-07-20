@@ -276,24 +276,47 @@ def order_recommendations(institution=None, limit=200) -> list:
     } for r in rows]
 
 
+# on_hand 이상치 판정 임계값. 보건소 단일 품목 재고가 1만 단위를 넘는 경우는
+# 대부분 단위(UoM) 오류로 의심된다(낱개 vs 박스). 실측 1,449행(전체의 0.35%).
+ONHAND_OUTLIER_THRESHOLD = 10_000
+
+
 def dashboard_central_summary() -> dict:
+    """중앙 대시보드 집계.
+
+    ⚠️ totalOnHand 주의 — 화면 대표지표로 쓰지 말 것:
+      단위(UoM)가 다른 품목의 수량을 그대로 합산한 값이다(캔디 '개' + 산소 'L' +
+      파스 '장'을 더한 셈). 이상치를 제외해도 의미가 생기지 않는 구조적 문제다.
+      게다가 실측상 상위 2행이 전체 합의 51.5%를 차지한다
+      ((금연)멘톨캔디 99,999,400 · 임신축하용품 99,997,569 — 단위 오류 의심).
+      중앙값 9 vs 평균 948.6 으로 왜도가 극단적이다.
+      → API 호환을 위해 필드는 유지하되, 대표지표로는 stockoutItems/belowRopItems 를 쓸 것.
+      데이터 품질 검토는 outlierItems 로 규모를 파악한다.
+    """
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) AS n FROM institutions")
         institutions_n = cur.fetchone()["n"]
         cur.execute(
             """
             SELECT sum(on_hand) AS total_on_hand,
-                   count(*) FILTER (WHERE status IN ('BELOW_ROP','CRITICAL')) AS below_rop_items
+                   count(*) FILTER (WHERE status IN ('BELOW_ROP','CRITICAL')) AS below_rop_items,
+                   count(*) FILTER (WHERE on_hand = 0) AS stockout_items,
+                   count(*) FILTER (WHERE on_hand >= %s) AS outlier_items
             FROM inventory
-            """
+            """,
+            (ONHAND_OUTLIER_THRESHOLD,),
         )
         agg = cur.fetchone()
         cur.execute("SELECT count(*) AS n FROM standard_items")
         standard_items_n = cur.fetchone()["n"]
         cur.execute("SELECT count(*) AS n FROM item_groups")
         item_groups_n = cur.fetchone()["n"]
-    return {"institutions": institutions_n, "totalOnHand": agg["total_on_hand"] or 0,
+    return {"institutions": institutions_n,
+            # ⚠️ 단위 혼재 합계 — 대표지표 사용 금지(위 docstring 참조)
+            "totalOnHand": agg["total_on_hand"] or 0,
             "belowRopItems": agg["below_rop_items"] or 0,
+            "stockoutItems": agg["stockout_items"] or 0,
+            "outlierItems": agg["outlier_items"] or 0,
             "standardItems": standard_items_n, "itemGroups": item_groups_n}
 
 
