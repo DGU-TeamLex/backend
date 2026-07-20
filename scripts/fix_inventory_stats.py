@@ -234,6 +234,27 @@ def main():
             status=f.status, updated_at=now()
             FROM _fix f WHERE i.institution_id=f.institution_id AND i.standard_code=f.standard_code""")
         print(f"inventory updated: {cur.rowcount:,} rows (L_POLICY={L_POLICY})")
+
+        # ★ 파생값 최종 정합화 — 반드시 '저장된 on_hand' 기준으로 다시 계산한다.
+        #   위 UPDATE 는 원장에서 계산한 값을 넣지만, 원장의 on_hand 와 DB 의 on_hand 가
+        #   항상 같지 않다(음수 클리핑, 적재 시점 차이, 매칭 누락 — 실측 60행 차이).
+        #   그 결과 '화면에 보이는 on_hand' 와 '발주권고/상태'가 어긋날 수 있다.
+        #     실측 피해: 발주권고 1,771행(발주 목록 1위 오염) · status 121행 불일치.
+        #   → 저장값만으로 재계산해, 사용자가 보는 화면 안에서 앞뒤가 맞도록 보장한다.
+        cur.execute("""
+            UPDATE inventory SET
+                order_recommendation = greatest(round(target - on_hand), 0)::int,
+                status = CASE WHEN on_hand <= 0       THEN 'CRITICAL'
+                              WHEN on_hand <  rop     THEN 'BELOW_ROP'
+                              WHEN on_hand <  rop*1.2 THEN 'WATCH'
+                              ELSE 'OK' END,
+                updated_at = now()
+            WHERE order_recommendation <> greatest(round(target - on_hand), 0)::int
+               OR status <> CASE WHEN on_hand <= 0       THEN 'CRITICAL'
+                                 WHEN on_hand <  rop     THEN 'BELOW_ROP'
+                                 WHEN on_hand <  rop*1.2 THEN 'WATCH'
+                                 ELSE 'OK' END""")
+        print(f"derived-value reconciliation: {cur.rowcount:,} rows fixed")
         conn.commit()
 
 
