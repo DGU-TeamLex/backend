@@ -1,6 +1,23 @@
 #!/usr/bin/env python3
 """inventory 통계 교정 + 메타코드 적재 (2026-07-17).
 
+⚠️ [임시 · ai#23 로 이관 예정] 소유권 경계 주의
+  이 스크립트는 mu/sigma·리드타임·z·SS/ROP·발주권고를 backend 에서 '직접 계산'한다.
+  그러나 README 의 저장소 책임 범위상 **재고정책(safety stock)·발주권고 알고리즘은
+  ai 레포 소유**이며, ai#23 "[모듈D] SS/ROP·발주권고 수치 계산 (AI 소유, backend서 이관)"
+  이 이 이관을 추적한다.
+
+  현재 이렇게 된 이유: ai 서빙 API 가 아직 배포 전이라, 프론트/DB 가 실데이터로 동작하도록
+  backend 가 임시로 계산해 inventory 테이블에 적재하고 있다(스톱갭).
+
+  이관 후 목표 구조:
+      ai 레포        : 수요예측(모듈B) → SS/ROP/발주권고 산출 → /ai/order-recommendations 서빙
+      backend(여기)  : 그 응답을 consume 해서 inventory 에 upsert + 권한·집계·서빙만 담당
+      frontend       : 변경 없음 (같은 /inventory-policy·/order-recommendations 계약)
+
+  → 이관 시에는 이 스크립트 대신 scripts/ai_policy_adapter.py 를 쓴다.
+    계산식(0복원 mu, 실증 리드타임, C↔D 커플링)은 아래 주석이 그대로 이관 근거가 된다.
+
 기존 scripts/import_ssis_dataset.py 의 두 가지 결함을 교정한다.
 
 [결함 1] mu/sigma 가 약 8배 과대 — 결측일 0 미복원
