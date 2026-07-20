@@ -195,12 +195,24 @@ def main():
         ss = (z * sg * np.sqrt(L)).round(1)
         rop = (mu * L + ss).round(1)
         tgt = (mu * (L + 1.0) + ss).round(1)
+
+        # ★ 음수 재고 클리핑 — DB 저장값과 정합 맞추기 (2026-07-18 버그픽스)
+        #   원장 최종 마감재고에는 음수가 존재한다(기관×물품 2,269건). 그런데 DB
+        #   inventory.on_hand 는 import_ssis_dataset.py 적재 시 이미 0 으로 클리핑돼 있다.
+        #   여기서 음수를 그대로 쓰면 발주권고 = target - (-1,298) 처럼 부풀려져
+        #   화면에 보이는 on_hand(=0) 와 앞뒤가 안 맞는다.
+        #     실측 피해: 1,771행 불일치, 그중 일부가 '지금 발주해야 할 품목' 목록
+        #     1위·3위를 차지했다(란셋 발주권고 129,747 — 실제로는 201).
+        #   → 저장값과 동일하게 0 클리핑한 값으로 발주권고/상태를 산출한다.
+        #   ※ 음수를 0으로 볼지, 원값 보존할지의 규칙 확정은 backend#40 에서 논의 중.
+        on_hand = out2["on_hand"].clip(lower=0)
+
         out2 = out2.assign(
             mu_=mu.round(2), sg_=sg.round(2), z_=z, L_=L.round(1), ss_=ss, rop_=rop, tgt_=tgt,
-            ord_=(tgt - out2["on_hand"]).clip(lower=0).round().astype(int),
-            st_=np.where(out2["on_hand"] <= 0, "CRITICAL",
-                np.where(out2["on_hand"] < rop, "BELOW_ROP",
-                np.where(out2["on_hand"] < rop * 1.2, "WATCH", "OK"))))
+            ord_=(tgt - on_hand).clip(lower=0).round().astype(int),
+            st_=np.where(on_hand <= 0, "CRITICAL",
+                np.where(on_hand < rop, "BELOW_ROP",
+                np.where(on_hand < rop * 1.2, "WATCH", "OK"))))
 
         # Neon pooled(PgBouncer) 연결은 세션을 재사용하므로 이전 실행의 임시테이블이
         # 남아있을 수 있다 → 선drop + ON COMMIT DROP 로 재실행 안전성 확보.
