@@ -195,12 +195,24 @@ def main():
         ss = (z * sg * np.sqrt(L)).round(1)
         rop = (mu * L + ss).round(1)
         tgt = (mu * (L + 1.0) + ss).round(1)
+
+        # ★ 음수 재고 클리핑 — DB 저장값과 정합 맞추기 (2026-07-18 버그픽스)
+        #   원장 최종 마감재고에는 음수가 존재한다(기관×물품 2,269건). 그런데 DB
+        #   inventory.on_hand 는 import_ssis_dataset.py 적재 시 이미 0 으로 클리핑돼 있다.
+        #   여기서 음수를 그대로 쓰면 발주권고 = target - (-1,298) 처럼 부풀려져
+        #   화면에 보이는 on_hand(=0) 와 앞뒤가 안 맞는다.
+        #     실측 피해: 1,771행 불일치, 그중 일부가 '지금 발주해야 할 품목' 목록
+        #     1위·3위를 차지했다(란셋 발주권고 129,747 — 실제로는 201).
+        #   → 저장값과 동일하게 0 클리핑한 값으로 발주권고/상태를 산출한다.
+        #   ※ 음수를 0으로 볼지, 원값 보존할지의 규칙 확정은 backend#40 에서 논의 중.
+        on_hand = out2["on_hand"].clip(lower=0)
+
         out2 = out2.assign(
             mu_=mu.round(2), sg_=sg.round(2), z_=z, L_=L.round(1), ss_=ss, rop_=rop, tgt_=tgt,
-            ord_=(tgt - out2["on_hand"]).clip(lower=0).round().astype(int),
-            st_=np.where(out2["on_hand"] <= 0, "CRITICAL",
-                np.where(out2["on_hand"] < rop, "BELOW_ROP",
-                np.where(out2["on_hand"] < rop * 1.2, "WATCH", "OK"))))
+            ord_=(tgt - on_hand).clip(lower=0).round().astype(int),
+            st_=np.where(on_hand <= 0, "CRITICAL",
+                np.where(on_hand < rop, "BELOW_ROP",
+                np.where(on_hand < rop * 1.2, "WATCH", "OK"))))
 
         # Neon pooled(PgBouncer) 연결은 세션을 재사용하므로 이전 실행의 임시테이블이
         # 남아있을 수 있다 → 선drop + ON COMMIT DROP 로 재실행 안전성 확보.
@@ -222,6 +234,27 @@ def main():
             status=f.status, updated_at=now()
             FROM _fix f WHERE i.institution_id=f.institution_id AND i.standard_code=f.standard_code""")
         print(f"inventory updated: {cur.rowcount:,} rows (L_POLICY={L_POLICY})")
+
+        # ★ 파생값 최종 정합화 — 반드시 '저장된 on_hand' 기준으로 다시 계산한다.
+        #   위 UPDATE 는 원장에서 계산한 값을 넣지만, 원장의 on_hand 와 DB 의 on_hand 가
+        #   항상 같지 않다(음수 클리핑, 적재 시점 차이, 매칭 누락 — 실측 60행 차이).
+        #   그 결과 '화면에 보이는 on_hand' 와 '발주권고/상태'가 어긋날 수 있다.
+        #     실측 피해: 발주권고 1,771행(발주 목록 1위 오염) · status 121행 불일치.
+        #   → 저장값만으로 재계산해, 사용자가 보는 화면 안에서 앞뒤가 맞도록 보장한다.
+        cur.execute("""
+            UPDATE inventory SET
+                order_recommendation = greatest(round(target - on_hand), 0)::int,
+                status = CASE WHEN on_hand <= 0       THEN 'CRITICAL'
+                              WHEN on_hand <  rop     THEN 'BELOW_ROP'
+                              WHEN on_hand <  rop*1.2 THEN 'WATCH'
+                              ELSE 'OK' END,
+                updated_at = now()
+            WHERE order_recommendation <> greatest(round(target - on_hand), 0)::int
+               OR status <> CASE WHEN on_hand <= 0       THEN 'CRITICAL'
+                                 WHEN on_hand <  rop     THEN 'BELOW_ROP'
+                                 WHEN on_hand <  rop*1.2 THEN 'WATCH'
+                                 ELSE 'OK' END""")
+        print(f"derived-value reconciliation: {cur.rowcount:,} rows fixed")
         conn.commit()
 
 
