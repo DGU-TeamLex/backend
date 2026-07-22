@@ -79,6 +79,10 @@ app.include_router(wep_stock.router)
 from routers import imports_upload  # noqa: E402
 
 app.include_router(imports_upload.router)
+
+from routers import order_reco_detail  # noqa: E402
+
+app.include_router(order_reco_detail.router)
 # ===================================================
 
 # ===== GraphQL (REST 병행, 사업수행계획서 4.3.2) =====
