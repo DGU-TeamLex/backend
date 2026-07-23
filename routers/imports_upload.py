@@ -33,7 +33,14 @@ _ALLOWED_CONTENT_TYPES = {
     "application/octet-stream",  # 일부 클라이언트가 붙이는 폴백 타입 허용
 }
 _ZIP_MAGIC = b"PK\x03\x04"                      # XLSX 는 OOXML=ZIP 컨테이너
-_MAX_UPLOAD_BYTES = 20 * 1024 * 1024            # 원본 크기 상한 20MB
+# Vercel 서버리스 함수는 요청 본문이 플랫폼 하드리밋(약 4.5MB)을 넘으면 FastAPI 코드가
+# 실행되기도 전에 413 FUNCTION_PAYLOAD_TOO_LARGE 로 막는다(이슈 #27). 따라서 기존 20MB
+# 상한은 사실상 도달 불가능한 죽은 값이었다. 코드 상한을 플랫폼 하드리밋보다 살짝 아래로
+# 두어, 한계에 근접한 파일은 Vercel 기본 오류 페이지 대신 아래 _reject 의 명확한 422 안내를
+# 받도록 한다. 그보다 큰 실데이터(예: SSIS 원본 46.9MB)는 서버리스 본문을 거치지 않는 업로드
+# 경로(오브젝트 스토리지 직접 업로드 등)로 전환해야 한다 — 근본 해결은 후속 범위.
+_VERCEL_BODY_LIMIT_BYTES = 4_500_000            # Vercel 서버리스 함수 요청 본문 하드리밋(≈4.5MB)
+_MAX_UPLOAD_BYTES = 4 * 1024 * 1024             # 코드 상한 4MB — 플랫폼 하드리밋 아래 안전 마진
 _MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024     # 압축 해제 총량 상한(zip bomb 방지)
 _MAX_COMPRESSION_RATIO = 200                     # 엔트리별 압축비 상한(zip bomb 방지)
 
@@ -63,7 +70,12 @@ async def create_import(
     if not raw:
         _reject("빈 파일입니다.")
     if len(raw) > _MAX_UPLOAD_BYTES:
-        _reject(f"파일이 너무 큽니다(최대 {_MAX_UPLOAD_BYTES // (1024 * 1024)}MB).")
+        _reject(
+            f"파일이 너무 큽니다(현재 {len(raw) / (1024 * 1024):.1f}MB, 최대 "
+            f"{_MAX_UPLOAD_BYTES // (1024 * 1024)}MB). 이 업로드 경로는 Vercel 서버리스 함수의 "
+            f"요청 본문 하드리밋(약 {_VERCEL_BODY_LIMIT_BYTES // 1_000_000}MB) 안에서만 동작합니다 — "
+            "더 큰 파일은 오브젝트 스토리지 직접 업로드 경로가 준비되면 그쪽을 이용하세요."
+        )
 
     # 4) 매직 바이트 — 확장자를 신뢰하지 않고 실제 컨테이너를 확인
     if not raw.startswith(_ZIP_MAGIC):

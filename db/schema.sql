@@ -51,11 +51,20 @@ CREATE TABLE IF NOT EXISTS inventory (
     order_recommendation INTEGER NOT NULL,
     supply_risk_level TEXT NOT NULL,
     status TEXT NOT NULL,        -- OK / WATCH / BELOW_ROP / CRITICAL
+    -- ai#25: 수요 성격 분류·절단보정 mu. 계산·적재 주체는 ai(소유권 경계: 스키마=backend, 데이터=ai).
+    --   demand_class : DORMANT(재고 있었는데 미사용=진짜 무수요) / CENSORED(재고 없어 못 씀)
+    --                  / ACTIVE(그 외). NULL = 아직 미적재.
+    --   mu_corrected : 결품기간 절단편향을 보정한 일평균 수요(ai#24). NULL = 미적재.
+    -- ⚠️ status 에는 아직 DORMANT 를 넣지 않는다 — 집계·정렬·프론트 라벨이 4값을 전제하므로
+    --    별도 대응 후 2단계에서 반영한다.
+    demand_class TEXT,
+    mu_corrected DOUBLE PRECISION,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (institution_id, standard_code)
 );
 CREATE INDEX IF NOT EXISTS idx_inventory_institution ON inventory(institution_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_status ON inventory(status);
+CREATE INDEX IF NOT EXISTS idx_inventory_demand_class ON inventory(demand_class);
 
 -- 사용자 (인증/RBAC). 공개 가입 없음 — 관리자가 미리 생성(scripts/seed_users.py).
 -- role: CENTRAL(중앙관리자, 전 기관 조회) / INSTITUTION(개별 보건기관 담당자, institution_id 로 스코프)

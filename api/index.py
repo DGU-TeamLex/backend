@@ -83,6 +83,10 @@ app.include_router(imports_upload.router)
 from routers import derived_alerts  # noqa: E402
 
 app.include_router(derived_alerts.router)
+
+from routers import user_admin  # noqa: E402
+
+app.include_router(user_admin.router)
 # ===================================================
 
 # ===== GraphQL (REST 병행, 사업수행계획서 4.3.2) =====
