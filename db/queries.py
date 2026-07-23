@@ -88,6 +88,69 @@ def get_user_by_email(email: str):
         return _user_row(r) if r else None
 
 
+# ===== 사용자 관리 (관리자 콘솔용, CENTRAL 전용, 이슈 #25) =====
+# 아래 함수들의 반환값은 비밀번호 해시(password_hash)를 절대 포함하지 않는다.
+def _user_public_row(r: dict) -> dict:
+    """계정의 공개 표현(목록/상세용) — passwordHash 제외, 소속기관명·생성시각 포함."""
+    return {
+        "id": r["id"], "email": r["email"], "name": r["name"], "role": r["role"],
+        "institutionId": r["institution_id"], "institutionName": r.get("institution_name"),
+        "createdAt": r["created_at"].isoformat() if r.get("created_at") else None,
+    }
+
+
+_USER_PUBLIC_SELECT = """
+    SELECT u.id, u.email, u.name, u.role, u.institution_id,
+           i.name AS institution_name, u.created_at
+    FROM users u LEFT JOIN institutions i ON i.id = u.institution_id
+"""
+
+
+def list_users() -> list:
+    """계정 목록(비밀번호 해시 제외). CENTRAL 전용 관리자 콘솔용."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(_USER_PUBLIC_SELECT + " ORDER BY u.created_at, u.id")
+        return [_user_public_row(r) for r in cur.fetchall()]
+
+
+def get_user_public(user_id: str):
+    """단일 계정(비밀번호 해시 제외). 없으면 None."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(_USER_PUBLIC_SELECT + " WHERE u.id = %s", (user_id,))
+        r = cur.fetchone()
+        return _user_public_row(r) if r else None
+
+
+def create_user(user_id, email, password_hash, name, role, institution_id=None) -> dict:
+    """신규 계정 생성. password_hash 는 이미 해싱된 값을 받는다(auth.security.hash_password)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO users (id, email, password_hash, name, role, institution_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (user_id, email, password_hash, name, role, institution_id),
+        )
+    return get_user_public(user_id)
+
+
+def update_user(user_id: str, fields: dict):
+    """계정 부분 수정(이름·역할·소속기관). fields 에 담긴 허용 키만 반영한다.
+    대상 계정이 없으면 None 을 반환한다(호출부에서 404 처리)."""
+    allowed = {"name": "name", "role": "role", "institutionId": "institution_id"}
+    sets, params = [], []
+    for key, col in allowed.items():
+        if key in fields:
+            sets.append(f"{col} = %s")
+            params.append(fields[key])
+    if not sets:
+        return get_user_public(user_id)
+    params.append(user_id)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = %s", params)
+        if cur.rowcount == 0:
+            return None
+    return get_user_public(user_id)
+
+
 def regions(category=None, sido=None) -> dict:
     where, params = _where(category=category, sido=sido)
     with get_conn() as conn, conn.cursor() as cur:
