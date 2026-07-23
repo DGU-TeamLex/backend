@@ -552,3 +552,126 @@ def dashboard_institution(institution_id: str):
         "inventory": inv,
         "alerts": al,
     }
+
+
+# ===== 재고미달 알림 온디맨드 파생 (backend#53) =====
+# `alerts` 테이블은 2026-07-10 CRITICAL 일부만 1회성 시드된 낡은 스냅샷이라
+# 재적재된 inventory(실재고)와 단절돼 있다. 재고미달 알림은 저장 테이블에
+# 의존하지 않고 조회 시점에 inventory 에서 파생한다(정렬·기관당 상한 적용).
+# alerts 테이블은 사람이 처리상태(승인/해소)를 관리하는 알림 용도로만 남긴다.
+_DERIVED_SHORTAGE_STATUSES = ("CRITICAL", "BELOW_ROP")
+_SEVERITY_BY_STATUS = {"CRITICAL": "CRITICAL", "BELOW_ROP": "WARNING"}
+
+# 휴면 품목(DORMANT: 재고가 있었는데도 안 나감 = 진짜 무수요)은 재고미달 알림에서 제외한다.
+# demand_class 는 ai#25 로 적재되며, 아직 NULL 이면(미적재) 모두 통과한다(IS DISTINCT FROM).
+# → ai 가 demand_class 를 채우면 자동으로 사장재고 알림이 걸러진다. 미적재 상태에선 동작 불변.
+_EXCLUDE_DORMANT = "inv.demand_class IS DISTINCT FROM 'DORMANT'"
+
+
+def shortage_alerts_derived(institution=None, statuses=None,
+                            per_institution=5, limit=200) -> list:
+    """inventory 실재고에서 재고미달 알림을 조회 시점에 파생한다.
+
+    전체 재주문점 미달은 20만 건 규모라 모두 알림화할 수 없으므로,
+    기관당 시급도 상위 `per_institution` 건으로 제한한 뒤 전역 `limit` 을 적용한다.
+    정렬: 상태 심각도(CRITICAL→BELOW_ROP) → 부족분(rop-available) 큰 순.
+    """
+    statuses = tuple(statuses) if statuses else _DERIVED_SHORTAGE_STATUSES
+    clauses = ["inv.status = ANY(%s)", _EXCLUDE_DORMANT]
+    params = [list(statuses)]
+    if institution:
+        clauses.append("inv.institution_id = %s"); params.append(institution)
+    where = " AND ".join(clauses)
+    params.extend([per_institution, limit])
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            WITH ranked AS (
+                SELECT i.id AS institution_id, i.name AS institution_name, i.sido, i.sigungu,
+                       inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
+                       inv.on_hand, inv.available, inv.ss, inv.rop, inv.target,
+                       inv.order_recommendation, inv.supply_risk_level, inv.status,
+                       (inv.rop - inv.available) AS shortage_gap,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY inv.institution_id
+                           ORDER BY CASE inv.status WHEN 'CRITICAL' THEN 0 WHEN 'BELOW_ROP' THEN 1 ELSE 2 END,
+                                    (inv.rop - inv.available) DESC, inv.standard_code
+                       ) AS rn
+                FROM inventory inv
+                JOIN institutions i ON i.id = inv.institution_id
+                JOIN standard_items si ON si.standard_code = inv.standard_code
+                WHERE {where}
+            )
+            SELECT * FROM ranked
+            WHERE rn <= %s
+            ORDER BY CASE status WHEN 'CRITICAL' THEN 0 WHEN 'BELOW_ROP' THEN 1 ELSE 2 END,
+                     shortage_gap DESC, institution_name, standard_code
+            LIMIT %s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+    return [_derived_alert_row(r) for r in rows]
+
+
+def _derived_alert_row(r: dict) -> dict:
+    status = r["status"]
+    return {
+        # 저장 테이블 알림이 아니라 파생 알림임을 alertId 접두사로 구분한다.
+        "alertId": f"derived:{r['institution_id']}:{r['standard_code']}",
+        "alertType": "재고미달",
+        "severity": _SEVERITY_BY_STATUS.get(status, "WARNING"),
+        "institutionId": r["institution_id"], "institutionName": r["institution_name"],
+        "sido": r["sido"], "sigungu": r["sigungu"],
+        "standardCode": r["standard_code"], "standardName": r["standard_name"],
+        "itemGroupId": r["item_group_id"], "criticality": r["criticality"], "uom": r["uom"],
+        "title": f"{r['standard_name']} 재주문점 미달",
+        "message": (
+            f"가용재고 {r['available']} / 재주문점(ROP) {r['rop']} — "
+            f"부족분 {r['shortage_gap']} (상태 {status})"
+        ),
+        "evidence": {
+            "onHand": r["on_hand"], "available": r["available"], "SS": r["ss"],
+            "ROP": r["rop"], "target": r["target"], "shortageGap": r["shortage_gap"],
+            "orderRecommendation": r["order_recommendation"],
+            "supplyRiskLevel": r["supply_risk_level"], "status": status,
+        },
+        # 파생 알림은 저장·해소 이력이 없다(사람이 관리하는 alerts 테이블과 구분).
+        "derived": True, "resolvedAt": None,
+    }
+
+
+def shortage_alerts_summary(institution=None, statuses=None) -> dict:
+    """재고미달 파생 알림의 실제 규모 집계(상태별 건수·기관수·품목수).
+
+    대시보드 openAlerts 가 낡은 시드 30건을 대표값으로 쓰던 문제(backend#53)를
+    바로잡기 위해, 실재고 기준 부족 규모를 그대로 노출한다.
+
+    ※ 대시보드 대표 카운트(belowRopItems 등)는 이미 dashboard_central_summary(#51)가
+      제공하므로, 이 엔드포인트는 그 값과 겹치는 총계용이 아니라 **상태별 기관수·품목수
+      분해**가 필요할 때 쓴다. DORMANT(사장재고)는 위 _EXCLUDE_DORMANT 로 제외되므로,
+      demand_class 적재 후에는 이 집계가 belowRopItems 보다 작아질 수 있다(그게 정상).
+    """
+    statuses = tuple(statuses) if statuses else _DERIVED_SHORTAGE_STATUSES
+    clauses = ["inv.status = ANY(%s)", _EXCLUDE_DORMANT]
+    params = [list(statuses)]
+    if institution:
+        clauses.append("inv.institution_id = %s"); params.append(institution)
+    where = " AND ".join(clauses)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT inv.status,
+                   count(*) AS n,
+                   count(DISTINCT inv.institution_id) AS institutions,
+                   count(DISTINCT inv.standard_code) AS items
+            FROM inventory inv
+            WHERE {where}
+            GROUP BY inv.status
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+    by_status = {r["status"]: {"count": r["n"], "institutions": r["institutions"], "items": r["items"]} for r in rows}
+    total = sum(v["count"] for v in by_status.values())
+    return {"totalShortage": total, "byStatus": by_status}

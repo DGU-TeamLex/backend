@@ -80,6 +80,10 @@ from routers import imports_upload  # noqa: E402
 
 app.include_router(imports_upload.router)
 
+from routers import derived_alerts  # noqa: E402
+
+app.include_router(derived_alerts.router)
+
 from routers import user_admin  # noqa: E402
 
 app.include_router(user_admin.router)
