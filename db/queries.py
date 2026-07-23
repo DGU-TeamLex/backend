@@ -25,6 +25,11 @@ def _inv_row(r: dict) -> dict:
         "leadTimeUsed": r["lead_time_used"], "zUsed": r["z_used"], "SS": r["ss"], "ROP": r["rop"],
         "target": r["target"], "orderRecommendation": r["order_recommendation"],
         "supplyRiskLevel": r["supply_risk_level"], "status": r["status"],
+        # AI 예측 산출물 (ai#24/#25, v5 정본). NULL 가능 — 미적재 기관/품목.
+        "muCorrected": r.get("mu_corrected"),      # 절단보정 일평균 수요(재고없어 못판 수요 복원)
+        "demandClass": r.get("demand_class"),      # 재고상태: DORMANT/CENSORED/ACTIVE
+        "demandPattern": r.get("demand_pattern"),  # 수요패턴(Syntetos-Boylan): smooth/intermittent/erratic/lumpy
+        "isMedical": r.get("is_medical"),          # 의료물품 여부(false=판촉·홍보물, 예측대상 아님)
     }
 
 
@@ -222,7 +227,8 @@ def inventory_for(institution_id: str) -> list:
             """
             SELECT inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
-                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status
+                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
+                   inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical
             FROM inventory inv JOIN standard_items si ON si.standard_code = inv.standard_code
             WHERE inv.institution_id = %s
             ORDER BY si.standard_code
@@ -244,7 +250,8 @@ def inventory_for_many(institution_ids: list) -> dict:
             """
             SELECT inv.institution_id, inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
-                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status
+                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
+                   inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical
             FROM inventory inv JOIN standard_items si ON si.standard_code = inv.standard_code
             WHERE inv.institution_id = ANY(%s)
             ORDER BY inv.institution_id, si.standard_code
@@ -293,7 +300,8 @@ def inventory_policy_rows(institution=None, status=None, limit=500) -> list:
             SELECT i.id AS institution_id, i.name AS institution_name, i.sido, i.sigungu,
                    inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
-                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status
+                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
+                   inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical
             FROM inventory inv
             JOIN institutions i ON i.id = inv.institution_id
             JOIN standard_items si ON si.standard_code = inv.standard_code
