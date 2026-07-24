@@ -829,6 +829,8 @@ class Mutation:
         user = DB.get_user_by_email(email)
         if not user or not verify_password(password, user["passwordHash"]):
             raise Exception("이메일 또는 비밀번호가 올바르지 않습니다.")
+        if not user.get("isActive", True):
+            raise Exception("비활성화된 계정입니다. 관리자에게 문의하세요.")
         token = create_access_token(user)
         return LoginResult(
             access_token=token, expires_in=ACCESS_TOKEN_EXPIRE_SECONDS,
