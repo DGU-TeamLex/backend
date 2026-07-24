@@ -35,6 +35,8 @@ def _inv_row(r: dict) -> dict:
         "familyAvailable": r.get("family_available"),  # 기관 내 같은 family 합계 가용재고
         "familyCodes": r.get("family_codes"),          # 그 family 가 쪼개진 물품코드 수(혈당스틱 최대 52)
         "familyStatus": r.get("family_status"),        # family 집계 기준 상태. CRITICAL 은 family 합계도 0일 때만
+        # 재고0 원인 (ai#32): NOT_OPERATED 미운영 / DATA_MISSING 재고기록누락 / TRUE_STOCKOUT 실결품
+        "zeroStockReason": r.get("zero_stock_reason"),
         "isMedical": r.get("is_medical"),          # 의료물품 여부(false=판촉·홍보물, 예측대상 아님)
     }
 
@@ -235,7 +237,7 @@ def inventory_for(institution_id: str) -> list:
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
                    inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
                    inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical, inv.mu_forecast,
-                   inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status
+                   inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status, inv.zero_stock_reason
             FROM inventory inv JOIN standard_items si ON si.standard_code = inv.standard_code
             WHERE inv.institution_id = %s
             ORDER BY si.standard_code
@@ -259,7 +261,7 @@ def inventory_for_many(institution_ids: list) -> dict:
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
                    inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
                    inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical, inv.mu_forecast,
-                   inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status
+                   inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status, inv.zero_stock_reason
             FROM inventory inv JOIN standard_items si ON si.standard_code = inv.standard_code
             WHERE inv.institution_id = ANY(%s)
             ORDER BY inv.institution_id, si.standard_code
@@ -310,7 +312,7 @@ def inventory_policy_rows(institution=None, status=None, limit=500) -> list:
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
                    inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
                    inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical, inv.mu_forecast,
-                   inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status
+                   inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status, inv.zero_stock_reason
             FROM inventory inv
             JOIN institutions i ON i.id = inv.institution_id
             JOIN standard_items si ON si.standard_code = inv.standard_code
