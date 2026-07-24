@@ -35,6 +35,7 @@ class UpdateUserBody(BaseModel):
     name: str | None = None
     role: str | None = None
     institutionId: str | None = None
+    isActive: bool | None = None  # false 로 두면 계정 비활성화(로그인 거부)
 
 
 def _validate_role(role: str) -> None:
@@ -67,7 +68,7 @@ def create_user(body: CreateUserBody, current_user: dict = _central_only):
 
 
 @router.patch("/users/{user_id}", tags=T_AUTH,
-              summary="계정 수정(CENTRAL 전용, 이름·역할·소속기관)")
+              summary="계정 수정(CENTRAL 전용, 이름·역할·소속기관·활성화)")
 def update_user(user_id: str, body: UpdateUserBody, current_user: dict = _central_only):
     fields = body.model_dump(exclude_unset=True)
     if "role" in fields:
