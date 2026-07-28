@@ -218,7 +218,16 @@ CREATE TABLE IF NOT EXISTS inventory_daily (
     -- 2018~19 파일(16컬럼)에는 없는 컬럼 → NULL
     purchase_place_code TEXT,            -- 구입처코드
     purchase_unit_price NUMERIC,         -- 구입단가
-    PRIMARY KEY (institution_code, dept_code, standard_code, stock_date)
+    -- ⚠️ PRIMARY KEY 를 두지 않는다.
+    --    (institution_code, dept_code, standard_code, stock_date) 가 자연키로 보이지만
+    --    원본이 유니크하지 않다. 2018~19 전수 실측:
+    --      6,106,936행 / 고유키 6,103,735 → 중복키 2,955개, 초과 3,201행(0.052%)
+    --      최대 8중복. 표본 140건 중 107건은 같은 키에 값이 다르다
+    --      (예: 같은 기관·부서·물품·일자에 마감재고량이 서로 다른 두 행).
+    --    PK 를 걸면 적재가 UniqueViolation 으로 실패하고, 임의로 하나만 남기면
+    --    원본이 왜곡된다. 원장 보존이 목적이므로 인덱스만 둔다.
+    --    중복 해석(정정 이력인지 분할 기록인지)은 정보원 확인 필요.
+    load_batch_id TEXT                   -- 적재 배치 식별자(재적재 시 범위 삭제용)
 ) PARTITION BY RANGE (stock_date);
 
 CREATE TABLE IF NOT EXISTS inventory_daily_2018_2019 PARTITION OF inventory_daily
@@ -226,6 +235,10 @@ CREATE TABLE IF NOT EXISTS inventory_daily_2018_2019 PARTITION OF inventory_dail
 CREATE TABLE IF NOT EXISTS inventory_daily_2024_2025 PARTITION OF inventory_daily
     FOR VALUES FROM ('2024-01-01') TO ('2026-01-01');
 
+-- 인덱스는 조회 패턴에 꼭 필요한 2개만 둔다.
+-- 2,240만 행 규모에서는 인덱스 하나가 초기 적재 시간을 크게 늘린다
+-- (실측: 인덱스 유지하며 COPY 시 610만 행에 20분 이상).
+-- 대량 최초 적재는 인덱스를 지운 뒤 넣고 마지막에 다시 만드는 편이 빠르다.
 CREATE INDEX IF NOT EXISTS idx_inv_daily_item_date ON inventory_daily(standard_code, stock_date);
 CREATE INDEX IF NOT EXISTS idx_inv_daily_inst_date ON inventory_daily(institution_code, stock_date);
 
