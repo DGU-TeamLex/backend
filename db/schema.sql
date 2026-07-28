@@ -50,7 +50,13 @@ CREATE TABLE IF NOT EXISTS inventory (
     target DOUBLE PRECISION NOT NULL,
     order_recommendation INTEGER NOT NULL,
     supply_risk_level TEXT NOT NULL,
-    status TEXT NOT NULL,        -- OK / WATCH / BELOW_ROP / CRITICAL
+    -- OK / WATCH / BELOW_ROP / CRITICAL / EXCLUDED
+    --   EXCLUDED(2026-07-28, ai#38): 재고가 0 이지만 결품이 아닌 건.
+    --     해당 기관이 취급하지 않거나(NOT_OPERATED) 데이터가 누락된(DATA_MISSING) 품목으로,
+    --     사유는 zero_stock_reason 컬럼에 있다. 판정·발주·알림 대상에서 뺀다.
+    --     알림 쿼리는 status 화이트리스트(CRITICAL/BELOW_ROP)를 쓰므로 자동으로 제외되지만,
+    --     on_hand=0 기준 집계는 별도로 걸러야 한다(db/queries.py stockout_items 참조).
+    status TEXT NOT NULL,
     -- ai#25: 수요 성격 분류·절단보정 mu. 계산·적재 주체는 ai(소유권 경계: 스키마=backend, 데이터=ai).
     --   demand_class : DORMANT(재고 있었는데 미사용=진짜 무수요) / CENSORED(재고 없어 못 씀)
     --                  / ACTIVE(그 외). NULL = 아직 미적재.

@@ -382,7 +382,12 @@ def dashboard_central_summary() -> dict:
             """
             SELECT sum(on_hand) AS total_on_hand,
                    count(*) FILTER (WHERE status IN ('BELOW_ROP','CRITICAL')) AS below_rop_items,
-                   count(*) FILTER (WHERE on_hand = 0) AS stockout_items,
+                   -- 재고 0 이라도 '판정 제외'(EXCLUDED)는 결품이 아니다 — 해당 기관이
+                   -- 취급하지 않거나(NOT_OPERATED) 데이터가 누락된(DATA_MISSING) 품목이며
+                   -- DGU-TeamLex/ai#38 로 status 가 분리됐다. 제외하지 않으면 실측상
+                   -- 128,250 중 63,930(약 절반)이 허수로 잡힌다.
+                   count(*) FILTER (WHERE on_hand = 0 AND status <> 'EXCLUDED') AS stockout_items,
+                   count(*) FILTER (WHERE on_hand = 0 AND status = 'EXCLUDED') AS not_operated_items,
                    count(*) FILTER (WHERE on_hand >= %s) AS outlier_items
             FROM inventory
             """,
@@ -398,6 +403,8 @@ def dashboard_central_summary() -> dict:
             "totalOnHand": agg["total_on_hand"] or 0,
             "belowRopItems": agg["below_rop_items"] or 0,
             "stockoutItems": agg["stockout_items"] or 0,
+            # 재고 0 이지만 결품이 아닌 건(미운영·데이터누락). 화면에서 결품과 구분해 표기한다.
+            "notOperatedItems": agg["not_operated_items"] or 0,
             "outlierItems": agg["outlier_items"] or 0,
             "standardItems": standard_items_n, "itemGroups": item_groups_n}
 
