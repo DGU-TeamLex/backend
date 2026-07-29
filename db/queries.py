@@ -358,6 +358,65 @@ def order_recommendations(institution=None, limit=200) -> list:
     } for r in rows]
 
 
+def relocation_candidates(limit=100) -> list:
+    """부족(CRITICAL/BELOW_ROP) 기관과 여유(OK, available > target) 기관을 같은 표준품목
+    기준으로 매칭한 재배치 제안 — 실재고(Neon Postgres) 기반. 부족분(target-available)과
+    여유분(available-target) 중 작은 쪽을 제안 수량으로 삼는다.
+
+    같은 시도(sido)를 우선 매칭하지만, 기관코드↔실명 매핑이 아직 정렬순서 임의매핑이라
+    (#16) 시도 정보 자체의 신뢰도가 낮다 — 응답의 sameSidoTentative 로 명시한다.
+    유효기간(로트) 데이터가 원본에 없어 FEFO(유효기간 임박 우선) 기준은 적용하지 못했다."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH need AS (
+                SELECT institution_id, standard_code, available, target,
+                       (target - available) AS shortfall
+                FROM inventory
+                WHERE status IN ('CRITICAL', 'BELOW_ROP') AND target > available
+            ),
+            surplus AS (
+                SELECT institution_id, standard_code, available, target,
+                       (available - target) AS surplus_qty
+                FROM inventory
+                WHERE status = 'OK' AND available > target
+            ),
+            matched AS (
+                SELECT DISTINCT ON (n.institution_id, n.standard_code)
+                       n.institution_id AS to_institution, s.institution_id AS from_institution,
+                       n.standard_code, n.shortfall, s.surplus_qty,
+                       ni.sido AS to_sido, si2.sido AS from_sido
+                FROM need n
+                JOIN surplus s ON s.standard_code = n.standard_code AND s.institution_id <> n.institution_id
+                JOIN institutions ni ON ni.id = n.institution_id
+                JOIN institutions si2 ON si2.id = s.institution_id
+                ORDER BY n.institution_id, n.standard_code,
+                         (ni.sido = si2.sido) DESC, s.surplus_qty DESC
+            )
+            SELECT m.*, st.standard_name, st.uom
+            FROM matched m
+            JOIN standard_items st ON st.standard_code = m.standard_code
+            ORDER BY m.shortfall DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+    out = []
+    for i, r in enumerate(rows, start=1):
+        qty = min(r["shortfall"], r["surplus_qty"])
+        same_sido = r["from_sido"] is not None and r["from_sido"] == r["to_sido"]
+        out.append({
+            "id": f"rl_derived_{i}",
+            "fromInstitution": r["from_institution"], "toInstitution": r["to_institution"],
+            "standardCode": r["standard_code"], "standardName": r["standard_name"], "uom": r["uom"],
+            "suggestedQty": qty, "sameSido": same_sido, "sameSidoTentative": True,
+            "reason": "같은 시도 여유 재고 매칭" if same_sido else "전국 여유 재고 매칭(권역 정보 잠정)",
+            "status": "제안",
+        })
+    return out
+
+
 # on_hand 이상치 판정 임계값. 보건소 단일 품목 재고가 1만 단위를 넘는 경우는
 # 대부분 단위(UoM) 오류로 의심된다(낱개 vs 박스). 실측 1,449행(전체의 0.35%).
 ONHAND_OUTLIER_THRESHOLD = 10_000
