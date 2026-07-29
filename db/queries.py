@@ -358,6 +358,138 @@ def order_recommendations(institution=None, limit=200) -> list:
     } for r in rows]
 
 
+# backend#35: ai 레포 수요예측 서빙 API(/api/v1/ai/forecasts)가 아직 배포되지 않아,
+# 이미 inventory 에 적재된 AI 산출물(mu_forecast/mu_corrected, ai#24/#25)을 폴백으로 소비한다.
+# ai 서빙이 배포되면 이 함수 대신 프록시 호출로 교체하면 된다.
+def forecasts_from_inventory(institution=None, limit=200) -> list:
+    clauses, params = ["inv.mu_forecast IS NOT NULL"], []
+    if institution:
+        clauses.append("inv.institution_id = %s"); params.append(institution)
+    where = " AND " + " AND ".join(clauses)
+    params.append(limit)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT inv.institution_id, inv.standard_code, si.standard_name,
+                   inv.mu, inv.sigma, inv.mu_forecast, inv.mu_corrected,
+                   inv.demand_class, inv.demand_pattern
+            FROM inventory inv
+            JOIN standard_items si ON si.standard_code = inv.standard_code
+            WHERE 1=1{where}
+            ORDER BY inv.mu_forecast DESC
+            LIMIT %s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+    return [_forecast_row(r) for r in rows]
+
+
+def forecast_one_from_inventory(institution_id: str, standard_code: str):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT inv.institution_id, inv.standard_code, si.standard_name,
+                   inv.mu, inv.sigma, inv.mu_forecast, inv.mu_corrected,
+                   inv.demand_class, inv.demand_pattern
+            FROM inventory inv
+            JOIN standard_items si ON si.standard_code = inv.standard_code
+            WHERE inv.institution_id = %s AND inv.standard_code = %s
+            """,
+            (institution_id, standard_code),
+        )
+        r = cur.fetchone()
+    return _forecast_row(r) if r else None
+
+
+def _forecast_row(r: dict) -> dict:
+    return {
+        "institutionId": r["institution_id"], "standardCode": r["standard_code"],
+        "standardName": r["standard_name"], "muDaily": r["mu"], "sigmaDaily": r["sigma"],
+        "muForecast": r["mu_forecast"], "muCorrected": r["mu_corrected"],
+        "demandClass": r["demand_class"], "demandPattern": r["demand_pattern"],
+        "source": "backend-mu-forecast",
+    }
+
+
+# backend#35: ai 공급위험 점수 서빙 API가 아직 배포되지 않아, 이미 inventory 에 적재된
+# 실제 supply_risk_level(메타코드 기반, scripts/fix_inventory_stats.py)을 품목군 단위로
+# 집계해 폴백으로 제공한다. ai 서빙이 배포되면 이 함수 대신 프록시 호출로 교체하면 된다.
+_RISK_RANK = {"NORMAL": 0, "CAUTION": 1, "WARNING": 2, "CRITICAL": 3}
+
+
+def supply_risk_by_group() -> list:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT si.item_group_id, inv.supply_risk_level, count(*) AS n
+            FROM inventory inv
+            JOIN standard_items si ON si.standard_code = inv.standard_code
+            GROUP BY si.item_group_id, inv.supply_risk_level
+            """
+        )
+        rows = cur.fetchall()
+    return _aggregate_group_risk(rows)
+
+
+def supply_risk_group_detail(item_group_id: str):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT si.item_group_id, inv.supply_risk_level, count(*) AS n
+            FROM inventory inv
+            JOIN standard_items si ON si.standard_code = inv.standard_code
+            WHERE si.item_group_id = %s
+            GROUP BY si.item_group_id, inv.supply_risk_level
+            """,
+            (item_group_id,),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return None
+        [group] = _aggregate_group_risk(rows)
+        cur.execute(
+            """
+            SELECT i.id AS institution_id, i.name AS institution_name, count(*) AS n
+            FROM inventory inv
+            JOIN standard_items si ON si.standard_code = inv.standard_code
+            JOIN institutions i ON i.id = inv.institution_id
+            WHERE si.item_group_id = %s AND inv.supply_risk_level IN ('CRITICAL', 'WARNING')
+            GROUP BY i.id, i.name
+            ORDER BY n DESC
+            LIMIT 10
+            """,
+            (item_group_id,),
+        )
+        group["topInstitutions"] = [
+            {"institutionId": r["institution_id"], "institutionName": r["institution_name"], "highRiskItems": r["n"]}
+            for r in cur.fetchall()
+        ]
+    return group
+
+
+def _aggregate_group_risk(rows) -> list:
+    by_group: dict = {}
+    for r in rows:
+        g = by_group.setdefault(r["item_group_id"], {"itemGroupId": r["item_group_id"], "levelCounts": {}, "total": 0})
+        g["levelCounts"][r["supply_risk_level"]] = r["n"]
+        g["total"] += r["n"]
+    out = []
+    for g in by_group.values():
+        counts = g["levelCounts"]
+        level = "NORMAL"
+        for lv in ("CRITICAL", "WARNING", "CAUTION"):
+            if counts.get(lv):
+                level = lv
+                break
+        weighted = sum(_RISK_RANK[lv] * n for lv, n in counts.items())
+        g["level"] = level
+        g["riskScore"] = round(100 * weighted / (g["total"] * 3), 1) if g["total"] else 0
+        g["source"] = "backend-supply-risk-level"
+        out.append(g)
+    return out
+
+
 # on_hand 이상치 판정 임계값. 보건소 단일 품목 재고가 1만 단위를 넘는 경우는
 # 대부분 단위(UoM) 오류로 의심된다(낱개 vs 박스). 실측 1,449행(전체의 0.35%).
 ONHAND_OUTLIER_THRESHOLD = 10_000
