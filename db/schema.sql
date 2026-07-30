@@ -76,7 +76,11 @@ CREATE TABLE IF NOT EXISTS inventory (
 );
 CREATE INDEX IF NOT EXISTS idx_inventory_institution ON inventory(institution_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_status ON inventory(status);
-CREATE INDEX IF NOT EXISTS idx_inventory_demand_class ON inventory(demand_class);
+-- idx_inventory_demand_class 제거 (2026-07-30).
+--   demand_class 는 값이 3종(DORMANT/CENSORED/ACTIVE)뿐인 저카디널리티 컬럼이고,
+--   조회 경로에서 WHERE 절로 쓰이지 않는다. 실측 스캔 10회 / 16MB.
+--   Neon 무료 한도 512MB 중 354MB 를 쓰던 상황이라 회수했다.
+--   되살리려면: CREATE INDEX idx_inventory_demand_class ON inventory(demand_class);
 
 -- 사용자 (인증/RBAC). 공개 가입 없음 — 관리자가 미리 생성(scripts/seed_users.py).
 -- role: CENTRAL(중앙관리자, 전 기관 조회) / INSTITUTION(개별 보건기관 담당자, institution_id 로 스코프)
