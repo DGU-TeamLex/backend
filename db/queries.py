@@ -24,6 +24,11 @@ def _inv_row(r: dict) -> dict:
         "onHand": r["on_hand"], "available": r["available"], "mu": r["mu"], "sigma": r["sigma"],
         "leadTimeUsed": r["lead_time_used"], "zUsed": r["z_used"], "SS": r["ss"], "ROP": r["rop"],
         "target": r["target"], "orderRecommendation": r["order_recommendation"],
+        # NULL = 권고량 산출 불가(사유는 orderSuppressReason). 0 = 발주 대상 아님. 둘을 구분해야 한다.
+        "orderSuppressReason": r.get("order_suppress_reason"),
+        "rawOrderRecommendation": r.get("raw_order_recommendation"),
+        "muIsFloored": r.get("mu_is_floored"),
+        "sigmaIsFloored": r.get("sigma_is_floored"),
         "supplyRiskLevel": r["supply_risk_level"], "status": r["status"],
         # AI 예측 산출물 (ai#24/#25, v5 정본). NULL 가능 — 미적재 기관/품목.
         "muForecast": r.get("mu_forecast"),        # 소진예측용 일수요율(직전3개월 roll3). 백테스트 WAPE 42.6% (static 49.9%보다 우위). 최근무활동이면 NULL→muCorrected 폴백
@@ -236,6 +241,8 @@ def inventory_for(institution_id: str) -> list:
             SELECT inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
                    inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
+                   inv.order_suppress_reason, inv.raw_order_recommendation,
+                   inv.mu_is_floored, inv.sigma_is_floored,
                    inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical, inv.mu_forecast,
                    inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status, inv.zero_stock_reason
             FROM inventory inv JOIN standard_items si ON si.standard_code = inv.standard_code
@@ -260,6 +267,8 @@ def inventory_for_many(institution_ids: list) -> dict:
             SELECT inv.institution_id, inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
                    inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
+                   inv.order_suppress_reason, inv.raw_order_recommendation,
+                   inv.mu_is_floored, inv.sigma_is_floored,
                    inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical, inv.mu_forecast,
                    inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status, inv.zero_stock_reason
             FROM inventory inv JOIN standard_items si ON si.standard_code = inv.standard_code
@@ -311,6 +320,8 @@ def inventory_policy_rows(institution=None, status=None, limit=500) -> list:
                    inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
                    inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
+                   inv.order_suppress_reason, inv.raw_order_recommendation,
+                   inv.mu_is_floored, inv.sigma_is_floored,
                    inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical, inv.mu_forecast,
                    inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status, inv.zero_stock_reason
             FROM inventory inv
@@ -565,7 +576,7 @@ def dashboard_institution(institution_id: str):
         "summary": {
             "trackedItems": len(inv),
             "belowRop": sum(1 for r in inv if r["status"] in ("BELOW_ROP", "CRITICAL")),
-            "orderNeeded": sum(1 for r in inv if r["orderRecommendation"] > 0),
+            "orderNeeded": sum(1 for r in inv if (r["orderRecommendation"] or 0) > 0),
             "openAlerts": sum(1 for a in al if a["resolvedAt"] is None),
         },
         "inventory": inv,
