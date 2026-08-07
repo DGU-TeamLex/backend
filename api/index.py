@@ -86,6 +86,10 @@ from routers import imports_upload  # noqa: E402
 
 app.include_router(imports_upload.router)
 
+from routers import item_master  # noqa: E402
+
+app.include_router(item_master.router)
+
 from routers import user_admin  # noqa: E402
 
 app.include_router(user_admin.router)
