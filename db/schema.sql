@@ -151,3 +151,104 @@ CREATE TABLE IF NOT EXISTS item_meta_map (
 CREATE INDEX IF NOT EXISTS idx_imm_cluster ON item_meta_map(supply_cluster_id);
 CREATE INDEX IF NOT EXISTS idx_imm_conf ON item_meta_map(material_confidence);
 CREATE INDEX IF NOT EXISTS idx_imm_scope ON item_meta_map(activity_scope);
+
+-- ===== 약성분 (#65) — 2026-07-28 3차 수신 =====
+-- 원본: (한국사회보장정보원) ... 데이터셋(약성분)_수정.DAT, 8컬럼 / 3,576,320행.
+-- 실측: 기관 3,861 × 약품코드 80,934, 성분코드 13,223종.
+--   (보건기관코드_en, 약품코드) 는 전수 유니크(3,576,320 = 행수) 이므로 그대로 PK 로 쓴다.
+-- 조인키는 무변환: 약품코드 = 물품재고의 물품코드 = standard_items.standard_code.
+-- ⚠️ 정의서 Data5 시트는 10컬럼(`사용시작일자`·`사용종료일자` 포함)으로 기재하나
+--    실제 파일에는 두 컬럼이 없다. 날짜 기반 취급여부 판별은 설계에서 제외한다.
+-- 적재 주체는 ai (소유권 경계: 스키마=backend, 데이터=ai).
+CREATE TABLE IF NOT EXISTS drug_ingredients (
+    institution_code TEXT NOT NULL,      -- 보건기관코드_en (익명화 코드 원본)
+    drug_code TEXT NOT NULL,             -- 약품코드 (= standard_items.standard_code)
+    drug_name TEXT,                      -- 약품명1
+    usage_division TEXT,                 -- 용도구분: 진료약 95.9% / 접종약 3.1% / 결핵약 / 영양제
+    drug_kind TEXT,                      -- 약종류구분: 경구 75.0% / 외용 12.0% / 주사 8.2%
+    drug_unit TEXT,                      -- 약품단위1
+    ingredient_code TEXT,                -- 성분코드 (행 단위 결측 12.75%)
+    ingredient_name TEXT,                -- 성분명
+    PRIMARY KEY (institution_code, drug_code)
+);
+CREATE INDEX IF NOT EXISTS idx_drug_ing_code ON drug_ingredients(drug_code);
+CREATE INDEX IF NOT EXISTS idx_drug_ing_ingredient ON drug_ingredients(ingredient_code);
+CREATE INDEX IF NOT EXISTS idx_drug_ing_usage ON drug_ingredients(usage_division, drug_kind);
+
+-- 약품코드 canonical 성분 매핑 (기관 간 교차 보완 결과).
+-- 행 단위 결측은 12.75% 이나, 같은 약품이라도 기관에 따라 채워진 곳이 있어
+-- 약품코드 기준으로 합치면 87.49%(70,812/80,934)까지 외부 데이터 없이 자체 복구된다.
+-- ai#43(is_medical 판정)·ai#45(성분군 계층)·pipeline#3(동일성분 매칭)이 이 테이블을 참조한다.
+CREATE TABLE IF NOT EXISTS drug_ingredient_master (
+    drug_code TEXT PRIMARY KEY,
+    ingredient_code TEXT,                -- 교차 보완 후 대표 성분코드 (미확보 시 NULL)
+    ingredient_name TEXT,
+    usage_division TEXT,
+    drug_kind TEXT,
+    -- 한 약품코드에 성분코드가 2개 이상 관측된 경우(복합제 또는 이력 변경). 실측 72종.
+    has_multiple_ingredients BOOLEAN NOT NULL DEFAULT FALSE,
+    source_institution_count INTEGER NOT NULL DEFAULT 0   -- 성분코드를 제공한 기관 수
+    -- ⚠️ standard_items 로의 FK 는 의도적으로 두지 않는다.
+    --    약성분 파일의 약품코드는 80,934종인데 standard_items 는 17,148종(W품목 9,641)이라
+    --    FK 를 걸면 카탈로그에 없는 약품이 전부 적재 실패한다. 조인은 애플리케이션에서
+    --    standard_code 로 수행하고, 매칭 여부는 아래 인덱스로 확인한다.
+);
+CREATE INDEX IF NOT EXISTS idx_dim_ingredient ON drug_ingredient_master(ingredient_code);
+
+-- ===== 일별 재고 시계열 (#63) =====
+-- 기존 `inventory` 는 (institution_id, standard_code) 유니크 = 현재 스냅샷이라
+-- 시간축·부서축이 없다. 롤링 백테스트 DB 재현·결측일 복원·폐기 지표·2018~19 적재가
+-- 모두 불가하므로 원장을 그대로 담는 테이블을 신설한다.
+--   2024~25: 16,265,602행(정의서) / 2018~19: 6,106,936행(정의서·실측 일치)
+-- 기간 분리는 stock_date RANGE 파티션으로 처리한다. 2020~2023 은 기관 제공 불가가
+-- 확정되어 파티션을 두지 않으며, 이 4년 공백은 영구 제약이다.
+CREATE TABLE IF NOT EXISTS inventory_daily (
+    institution_code TEXT NOT NULL,      -- 보건기관코드_en (익명화 원본 코드)
+    dept_code TEXT NOT NULL DEFAULT '',  -- 부서코드
+    standard_code TEXT NOT NULL,         -- 물품코드
+    stock_date DATE NOT NULL,            -- 재고마감일
+    prev_closing_qty NUMERIC,            -- 이전최종재고량
+    closing_qty NUMERIC,                 -- 마감재고량
+    -- 입고 3종
+    qty_in NUMERIC,                      -- 입고량 (외부 구매)
+    qty_in_transfer NUMERIC,             -- 불출입고량
+    qty_in_return NUMERIC,               -- 반납입고량
+    -- 출고 6종
+    qty_out_transfer NUMERIC,            -- 불출출고량
+    qty_out_normal NUMERIC,              -- 정상출고량 ★순수요 (ai#40)
+    qty_out_return NUMERIC,              -- 반품출고량
+    qty_out_disposal NUMERIC,            -- 폐기출고량
+    qty_out_auto_disposal NUMERIC,       -- 자동폐기출고량 ※수지 미반영·수요 제외 (ai#42)
+    qty_out_adjust NUMERIC,              -- 보정출고량
+    -- 2018~19 파일(16컬럼)에는 없는 컬럼 → NULL
+    purchase_place_code TEXT,            -- 구입처코드
+    purchase_unit_price NUMERIC,         -- 구입단가
+    -- ⚠️ PRIMARY KEY 를 두지 않는다.
+    --    (institution_code, dept_code, standard_code, stock_date) 가 자연키로 보이지만
+    --    원본이 유니크하지 않다. 2018~19 전수 실측:
+    --      6,106,936행 / 고유키 6,103,735 → 중복키 2,955개, 초과 3,201행(0.052%)
+    --      최대 8중복. 표본 140건 중 107건은 같은 키에 값이 다르다
+    --      (예: 같은 기관·부서·물품·일자에 마감재고량이 서로 다른 두 행).
+    --    PK 를 걸면 적재가 UniqueViolation 으로 실패하고, 임의로 하나만 남기면
+    --    원본이 왜곡된다. 원장 보존이 목적이므로 인덱스만 둔다.
+    --    중복 해석(정정 이력인지 분할 기록인지)은 정보원 확인 필요.
+    load_batch_id TEXT                   -- 적재 배치 식별자(재적재 시 범위 삭제용)
+) PARTITION BY RANGE (stock_date);
+
+CREATE TABLE IF NOT EXISTS inventory_daily_2018_2019 PARTITION OF inventory_daily
+    FOR VALUES FROM ('2018-01-01') TO ('2020-01-01');
+CREATE TABLE IF NOT EXISTS inventory_daily_2024_2025 PARTITION OF inventory_daily
+    FOR VALUES FROM ('2024-01-01') TO ('2026-01-01');
+
+-- 인덱스는 조회 패턴에 꼭 필요한 2개만 둔다.
+-- 2,240만 행 규모에서는 인덱스 하나가 초기 적재 시간을 크게 늘린다
+-- (실측: 인덱스 유지하며 COPY 시 610만 행에 20분 이상).
+-- 대량 최초 적재는 인덱스를 지운 뒤 넣고 마지막에 다시 만드는 편이 빠르다.
+CREATE INDEX IF NOT EXISTS idx_inv_daily_item_date ON inventory_daily(standard_code, stock_date);
+CREATE INDEX IF NOT EXISTS idx_inv_daily_inst_date ON inventory_daily(institution_code, stock_date);
+
+-- 과거(2018~19) 전용 품목 플래그 (#63).
+-- 2018~19 신규 품목 2,707종(W 2,155 / O 523 / 기타 29)은 현재 재고 화면에
+-- 노출되면 안 되므로 카탈로그에 플래그를 둔다.
+ALTER TABLE standard_items ADD COLUMN IF NOT EXISTS historical_only BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_std_items_historical ON standard_items(historical_only);
