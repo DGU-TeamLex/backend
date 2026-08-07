@@ -91,6 +91,8 @@ def _user_row(r: dict) -> dict:
     return {
         "id": r["id"], "email": r["email"], "passwordHash": r["password_hash"],
         "name": r["name"], "role": r["role"], "institutionId": r["institution_id"],
+        # 미이행(ALTER 안 된) DB 도 로그인 가능하도록 컬럼 부재 시 활성으로 간주.
+        "isActive": r.get("is_active", True),
     }
 
 
@@ -108,13 +110,14 @@ def _user_public_row(r: dict) -> dict:
     return {
         "id": r["id"], "email": r["email"], "name": r["name"], "role": r["role"],
         "institutionId": r["institution_id"], "institutionName": r.get("institution_name"),
+        "isActive": r.get("is_active", True),
         "createdAt": r["created_at"].isoformat() if r.get("created_at") else None,
     }
 
 
 _USER_PUBLIC_SELECT = """
     SELECT u.id, u.email, u.name, u.role, u.institution_id,
-           i.name AS institution_name, u.created_at
+           i.name AS institution_name, u.is_active, u.created_at
     FROM users u LEFT JOIN institutions i ON i.id = u.institution_id
 """
 
@@ -148,7 +151,8 @@ def create_user(user_id, email, password_hash, name, role, institution_id=None) 
 def update_user(user_id: str, fields: dict):
     """계정 부분 수정(이름·역할·소속기관). fields 에 담긴 허용 키만 반영한다.
     대상 계정이 없으면 None 을 반환한다(호출부에서 404 처리)."""
-    allowed = {"name": "name", "role": "role", "institutionId": "institution_id"}
+    allowed = {"name": "name", "role": "role", "institutionId": "institution_id",
+               "isActive": "is_active"}
     sets, params = [], []
     for key, col in allowed.items():
         if key in fields:
@@ -490,6 +494,65 @@ def _aggregate_group_risk(rows) -> list:
     return out
 
 
+def relocation_candidates(limit=100) -> list:
+    """부족(CRITICAL/BELOW_ROP) 기관과 여유(OK, available > target) 기관을 같은 표준품목
+    기준으로 매칭한 재배치 제안 — 실재고(Neon Postgres) 기반. 부족분(target-available)과
+    여유분(available-target) 중 작은 쪽을 제안 수량으로 삼는다.
+
+    같은 시도(sido)를 우선 매칭하지만, 기관코드↔실명 매핑이 아직 정렬순서 임의매핑이라
+    (#16) 시도 정보 자체의 신뢰도가 낮다 — 응답의 sameSidoTentative 로 명시한다.
+    유효기간(로트) 데이터가 원본에 없어 FEFO(유효기간 임박 우선) 기준은 적용하지 못했다."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH need AS (
+                SELECT institution_id, standard_code, available, target,
+                       (target - available) AS shortfall
+                FROM inventory
+                WHERE status IN ('CRITICAL', 'BELOW_ROP') AND target > available
+            ),
+            surplus AS (
+                SELECT institution_id, standard_code, available, target,
+                       (available - target) AS surplus_qty
+                FROM inventory
+                WHERE status = 'OK' AND available > target
+            ),
+            matched AS (
+                SELECT DISTINCT ON (n.institution_id, n.standard_code)
+                       n.institution_id AS to_institution, s.institution_id AS from_institution,
+                       n.standard_code, n.shortfall, s.surplus_qty,
+                       ni.sido AS to_sido, si2.sido AS from_sido
+                FROM need n
+                JOIN surplus s ON s.standard_code = n.standard_code AND s.institution_id <> n.institution_id
+                JOIN institutions ni ON ni.id = n.institution_id
+                JOIN institutions si2 ON si2.id = s.institution_id
+                ORDER BY n.institution_id, n.standard_code,
+                         (ni.sido = si2.sido) DESC, s.surplus_qty DESC
+            )
+            SELECT m.*, st.standard_name, st.uom
+            FROM matched m
+            JOIN standard_items st ON st.standard_code = m.standard_code
+            ORDER BY m.shortfall DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+    out = []
+    for i, r in enumerate(rows, start=1):
+        qty = min(r["shortfall"], r["surplus_qty"])
+        same_sido = r["from_sido"] is not None and r["from_sido"] == r["to_sido"]
+        out.append({
+            "id": f"rl_derived_{i}",
+            "fromInstitution": r["from_institution"], "toInstitution": r["to_institution"],
+            "standardCode": r["standard_code"], "standardName": r["standard_name"], "uom": r["uom"],
+            "suggestedQty": qty, "sameSido": same_sido, "sameSidoTentative": True,
+            "reason": "같은 시도 여유 재고 매칭" if same_sido else "전국 여유 재고 매칭(권역 정보 잠정)",
+            "status": "제안",
+        })
+    return out
+
+
 # on_hand 이상치 판정 임계값. 보건소 단일 품목 재고가 1만 단위를 넘는 경우는
 # 대부분 단위(UoM) 오류로 의심된다(낱개 vs 박스). 실측 1,449행(전체의 0.35%).
 ONHAND_OUTLIER_THRESHOLD = 10_000
@@ -514,7 +577,12 @@ def dashboard_central_summary() -> dict:
             """
             SELECT sum(on_hand) AS total_on_hand,
                    count(*) FILTER (WHERE status IN ('BELOW_ROP','CRITICAL')) AS below_rop_items,
-                   count(*) FILTER (WHERE on_hand = 0) AS stockout_items,
+                   -- 재고 0 이라도 '판정 제외'(EXCLUDED)는 결품이 아니다 — 해당 기관이
+                   -- 취급하지 않거나(NOT_OPERATED) 데이터가 누락된(DATA_MISSING) 품목이며
+                   -- DGU-TeamLex/ai#38 로 status 가 분리됐다. 제외하지 않으면 실측상
+                   -- 128,250 중 63,930(약 절반)이 허수로 잡힌다.
+                   count(*) FILTER (WHERE on_hand = 0 AND status <> 'EXCLUDED') AS stockout_items,
+                   count(*) FILTER (WHERE on_hand = 0 AND status = 'EXCLUDED') AS not_operated_items,
                    count(*) FILTER (WHERE on_hand >= %s) AS outlier_items
             FROM inventory
             """,
@@ -530,6 +598,8 @@ def dashboard_central_summary() -> dict:
             "totalOnHand": agg["total_on_hand"] or 0,
             "belowRopItems": agg["below_rop_items"] or 0,
             "stockoutItems": agg["stockout_items"] or 0,
+            # 재고 0 이지만 결품이 아닌 건(미운영·데이터누락). 화면에서 결품과 구분해 표기한다.
+            "notOperatedItems": agg["not_operated_items"] or 0,
             "outlierItems": agg["outlier_items"] or 0,
             "standardItems": standard_items_n, "itemGroups": item_groups_n}
 

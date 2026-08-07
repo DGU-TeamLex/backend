@@ -44,6 +44,8 @@ def login(body: LoginBody):
     user = DB.get_user_by_email(body.email)
     if not user or not verify_password(body.password, user["passwordHash"]):
         raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다.")
+    if not user.get("isActive", True):
+        raise HTTPException(status_code=403, detail="비활성화된 계정입니다. 관리자에게 문의하세요.")
     token = create_access_token(user)
     return {
         "accessToken": token,
@@ -250,6 +252,8 @@ def dashboard_central(_admin: dict = _central_only):
             "totalOnHand": core["totalOnHand"],
             "belowRopItems": core["belowRopItems"],
             "stockoutItems": core["stockoutItems"],
+            # 재고 0 이지만 결품이 아닌 건(미운영·데이터누락, ai#38). 결품과 구분해 표기할 것.
+            "notOperatedItems": core["notOperatedItems"],
             "outlierItems": core["outlierItems"],
             "criticalRiskGroups": sum(1 for r in D.SUPPLY_RISK if r["level"] == "CRITICAL"),
         },
