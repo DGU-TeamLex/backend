@@ -110,7 +110,7 @@ class InventoryItem:
     ss: float
     rop: float
     target: float
-    order_recommendation: int
+    order_recommendation: Optional[int]
     supply_risk_level: str
     status: str
 
@@ -382,7 +382,7 @@ class InventoryPolicyRow:
     ss: float
     rop: float
     target: float
-    order_recommendation: int
+    order_recommendation: Optional[int]
     supply_risk_level: str
     status: str
 
@@ -410,7 +410,7 @@ class InventoryPolicyDetail:
     ss: float
     rop: float
     target: float
-    order_recommendation: int
+    order_recommendation: Optional[int]
     supply_risk_level: str
     status: str
     assumed_lead_time: bool

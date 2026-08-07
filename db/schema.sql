@@ -48,7 +48,11 @@ CREATE TABLE IF NOT EXISTS inventory (
     ss DOUBLE PRECISION NOT NULL,
     rop DOUBLE PRECISION NOT NULL,
     target DOUBLE PRECISION NOT NULL,
-    order_recommendation INTEGER NOT NULL,
+    -- ai 정책(inventory-status-v1.1)은 판단 불가 건에 NULL 을 요구한다.
+    --   DATA_MISSING(재고 기재 누락 의심) · STALE(관측이 오래됨) → 권고량 산출 불가 = NULL
+    --   DORMANT / NOT_OPERATED                                  → 발주 대상 아님 = 0
+    -- 0 과 NULL 을 구분하지 않으면 "발주 안 함"과 "모르겠음"이 화면에서 같아진다.
+    order_recommendation INTEGER,
     supply_risk_level TEXT NOT NULL,
     -- OK / WATCH / BELOW_ROP / CRITICAL / EXCLUDED
     --   EXCLUDED(2026-07-28, ai#38): 재고가 0 이지만 결품이 아닌 건.
@@ -65,12 +69,24 @@ CREATE TABLE IF NOT EXISTS inventory (
     --    별도 대응 후 2단계에서 반영한다.
     demand_class TEXT,
     mu_corrected DOUBLE PRECISION,
+    -- 발주 억제 감사용(ai#52). 계산 결과를 덮어쓰기만 하면 왜 0/NULL 인지 되짚을 수 없다.
+    --   raw_order_recommendation : 억제 전 원시 권고량
+    --   order_suppress_reason    : DORMANT | NOT_OPERATED | DATA_MISSING | STALE
+    raw_order_recommendation INTEGER,
+    order_suppress_reason TEXT,
+    -- 수요 모멘트에 바닥값이 적용됐는지. ai 정책은 이 플래그를 판정·예측·API 에 노출하도록 한다.
+    mu_is_floored BOOLEAN,
+    sigma_is_floored BOOLEAN,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (institution_id, standard_code)
 );
 CREATE INDEX IF NOT EXISTS idx_inventory_institution ON inventory(institution_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_status ON inventory(status);
-CREATE INDEX IF NOT EXISTS idx_inventory_demand_class ON inventory(demand_class);
+-- idx_inventory_demand_class 제거 (2026-07-30).
+--   demand_class 는 값이 3종(DORMANT/CENSORED/ACTIVE)뿐인 저카디널리티 컬럼이고,
+--   조회 경로에서 WHERE 절로 쓰이지 않는다. 실측 스캔 10회 / 16MB.
+--   Neon 무료 한도 512MB 중 354MB 를 쓰던 상황이라 회수했다.
+--   되살리려면: CREATE INDEX idx_inventory_demand_class ON inventory(demand_class);
 
 -- 사용자 (인증/RBAC). 공개 가입 없음 — 관리자가 미리 생성(scripts/seed_users.py).
 -- role: CENTRAL(중앙관리자, 전 기관 조회) / INSTITUTION(개별 보건기관 담당자, institution_id 로 스코프)
@@ -258,3 +274,11 @@ CREATE INDEX IF NOT EXISTS idx_inv_daily_inst_date ON inventory_daily(institutio
 -- 노출되면 안 되므로 카탈로그에 플래그를 둔다.
 ALTER TABLE standard_items ADD COLUMN IF NOT EXISTS historical_only BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS idx_std_items_historical ON standard_items(historical_only);
+
+-- ── 기존 DB 반영용 멱등 DDL ──────────────────────────────────────────
+-- CREATE TABLE IF NOT EXISTS 는 이미 있는 테이블을 바꾸지 않으므로 별도로 적용한다.
+ALTER TABLE inventory ALTER COLUMN order_recommendation DROP NOT NULL;
+ALTER TABLE inventory ADD COLUMN IF NOT EXISTS raw_order_recommendation INTEGER;
+ALTER TABLE inventory ADD COLUMN IF NOT EXISTS order_suppress_reason TEXT;
+ALTER TABLE inventory ADD COLUMN IF NOT EXISTS mu_is_floored BOOLEAN;
+ALTER TABLE inventory ADD COLUMN IF NOT EXISTS sigma_is_floored BOOLEAN;
