@@ -650,6 +650,17 @@ def standard_items(q=None, group=None, limit=500, offset=0) -> list:
         }
 
 
+def standard_items_catalog() -> list:
+    """표준화 매칭용 전체 카탈로그(코드·명·품목군만, 페이지네이션 없음).
+
+    17,148 종 규모라 매 요청 전량 스캔이 가능하다(이슈 #20 매칭 엔진).
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT standard_code, standard_name, item_group_id FROM standard_items")
+        return [{"standardCode": r["standard_code"], "standardName": r["standard_name"],
+                  "itemGroupId": r["item_group_id"]} for r in cur.fetchall()]
+
+
 def top_shortage_institutions(n=8) -> list:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(

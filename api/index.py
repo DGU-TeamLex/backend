@@ -102,6 +102,10 @@ from routers import user_admin  # noqa: E402
 
 app.include_router(user_admin.router)
 
+from routers import standardization_match  # noqa: E402
+
+app.include_router(standardization_match.router)
+
 from routers import relocation_reco  # noqa: E402
 
 app.include_router(relocation_reco.router)
