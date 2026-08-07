@@ -90,6 +90,14 @@ from routers import supply_risk_alerts  # noqa: E402
 
 app.include_router(supply_risk_alerts.router)
 
+from routers import order_reco_detail  # noqa: E402
+
+app.include_router(order_reco_detail.router)
+
+from routers import item_master  # noqa: E402
+
+app.include_router(item_master.router)
+
 from routers import user_admin  # noqa: E402
 
 app.include_router(user_admin.router)
