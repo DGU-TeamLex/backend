@@ -110,7 +110,7 @@ class InventoryItem:
     ss: float
     rop: float
     target: float
-    order_recommendation: int
+    order_recommendation: Optional[int]
     supply_risk_level: str
     status: str
 
@@ -382,7 +382,7 @@ class InventoryPolicyRow:
     ss: float
     rop: float
     target: float
-    order_recommendation: int
+    order_recommendation: Optional[int]
     supply_risk_level: str
     status: str
 
@@ -410,7 +410,7 @@ class InventoryPolicyDetail:
     ss: float
     rop: float
     target: float
-    order_recommendation: int
+    order_recommendation: Optional[int]
     supply_risk_level: str
     status: str
     assumed_lead_time: bool
@@ -533,7 +533,10 @@ class CentralSummary:
                     "상위 2행이 전체의 51.5%를 차지(단위 오류 의심). "
                     "화면에는 stockoutItems/belowRopItems 를 쓸 것.")
     below_rop_items: int
-    stockout_items: int = strawberry.field(description="현재고 0 인 기관×품목 건수")
+    stockout_items: int = strawberry.field(
+        description="실제 결품 건수 — 현재고 0 이면서 판정 제외(EXCLUDED)가 아닌 기관×품목")
+    not_operated_items: int = strawberry.field(
+        description="현재고 0 이지만 결품이 아닌 건 — 미운영·데이터누락(ai#38)")
     outlier_items: int = strawberry.field(description="현재고 1만 이상 — 단위 오류 의심 건수(데이터 품질)")
     critical_risk_groups: int
 
@@ -784,7 +787,9 @@ class Query:
                 institutions=core["institutions"], standard_items=core["standardItems"], item_groups=core["itemGroups"],
                 open_alerts=len(open_alerts), total_on_hand=core["totalOnHand"],
                 below_rop_items=core["belowRopItems"],
-                stockout_items=core["stockoutItems"], outlier_items=core["outlierItems"],
+                stockout_items=core["stockoutItems"],
+                not_operated_items=core["notOperatedItems"],
+                outlier_items=core["outlierItems"],
                 critical_risk_groups=sum(1 for r in D.SUPPLY_RISK if r["level"] == "CRITICAL"),
             ),
             alerts_by_severity=sev,
@@ -829,6 +834,8 @@ class Mutation:
         user = DB.get_user_by_email(email)
         if not user or not verify_password(password, user["passwordHash"]):
             raise Exception("이메일 또는 비밀번호가 올바르지 않습니다.")
+        if not user.get("isActive", True):
+            raise Exception("비활성화된 계정입니다. 관리자에게 문의하세요.")
         token = create_access_token(user)
         return LoginResult(
             access_token=token, expires_in=ACCESS_TOKEN_EXPIRE_SECONDS,
