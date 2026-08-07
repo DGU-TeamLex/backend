@@ -25,6 +25,19 @@ def _inv_row(r: dict) -> dict:
         "leadTimeUsed": r["lead_time_used"], "zUsed": r["z_used"], "SS": r["ss"], "ROP": r["rop"],
         "target": r["target"], "orderRecommendation": r["order_recommendation"],
         "supplyRiskLevel": r["supply_risk_level"], "status": r["status"],
+        # AI 예측 산출물 (ai#24/#25, v5 정본). NULL 가능 — 미적재 기관/품목.
+        "muForecast": r.get("mu_forecast"),        # 소진예측용 일수요율(직전3개월 roll3). 백테스트 WAPE 42.6% (static 49.9%보다 우위). 최근무활동이면 NULL→muCorrected 폴백
+        "muCorrected": r.get("mu_corrected"),      # 절단보정 일평균 수요(재고없어 못판 수요 복원). SS/ROP 안전버퍼용
+        "demandClass": r.get("demand_class"),      # 재고상태: DORMANT/CENSORED/ACTIVE
+        "demandPattern": r.get("demand_pattern"),  # 수요패턴(Syntetos-Boylan): smooth/intermittent/erratic/lumpy
+        # family(동일 품목군) 집계 — 물품코드 분산 오탐 제거용 (ai#33). 개별 status 는 그대로 두고 병기.
+        "itemFamilyId": r.get("item_family_id"),      # 기관 내 동일 품목군 식별자
+        "familyAvailable": r.get("family_available"),  # 기관 내 같은 family 합계 가용재고
+        "familyCodes": r.get("family_codes"),          # 그 family 가 쪼개진 물품코드 수(혈당스틱 최대 52)
+        "familyStatus": r.get("family_status"),        # family 집계 기준 상태. CRITICAL 은 family 합계도 0일 때만
+        # 재고0 원인 (ai#32): NOT_OPERATED 미운영 / DATA_MISSING 재고기록누락 / TRUE_STOCKOUT 실결품
+        "zeroStockReason": r.get("zero_stock_reason"),
+        "isMedical": r.get("is_medical"),          # 의료물품 여부(false=판촉·홍보물, 예측대상 아님)
     }
 
 
@@ -86,6 +99,69 @@ def get_user_by_email(email: str):
         cur.execute("SELECT * FROM users WHERE email = %s", (email,))
         r = cur.fetchone()
         return _user_row(r) if r else None
+
+
+# ===== 사용자 관리 (관리자 콘솔용, CENTRAL 전용, 이슈 #25) =====
+# 아래 함수들의 반환값은 비밀번호 해시(password_hash)를 절대 포함하지 않는다.
+def _user_public_row(r: dict) -> dict:
+    """계정의 공개 표현(목록/상세용) — passwordHash 제외, 소속기관명·생성시각 포함."""
+    return {
+        "id": r["id"], "email": r["email"], "name": r["name"], "role": r["role"],
+        "institutionId": r["institution_id"], "institutionName": r.get("institution_name"),
+        "createdAt": r["created_at"].isoformat() if r.get("created_at") else None,
+    }
+
+
+_USER_PUBLIC_SELECT = """
+    SELECT u.id, u.email, u.name, u.role, u.institution_id,
+           i.name AS institution_name, u.created_at
+    FROM users u LEFT JOIN institutions i ON i.id = u.institution_id
+"""
+
+
+def list_users() -> list:
+    """계정 목록(비밀번호 해시 제외). CENTRAL 전용 관리자 콘솔용."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(_USER_PUBLIC_SELECT + " ORDER BY u.created_at, u.id")
+        return [_user_public_row(r) for r in cur.fetchall()]
+
+
+def get_user_public(user_id: str):
+    """단일 계정(비밀번호 해시 제외). 없으면 None."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(_USER_PUBLIC_SELECT + " WHERE u.id = %s", (user_id,))
+        r = cur.fetchone()
+        return _user_public_row(r) if r else None
+
+
+def create_user(user_id, email, password_hash, name, role, institution_id=None) -> dict:
+    """신규 계정 생성. password_hash 는 이미 해싱된 값을 받는다(auth.security.hash_password)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO users (id, email, password_hash, name, role, institution_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (user_id, email, password_hash, name, role, institution_id),
+        )
+    return get_user_public(user_id)
+
+
+def update_user(user_id: str, fields: dict):
+    """계정 부분 수정(이름·역할·소속기관). fields 에 담긴 허용 키만 반영한다.
+    대상 계정이 없으면 None 을 반환한다(호출부에서 404 처리)."""
+    allowed = {"name": "name", "role": "role", "institutionId": "institution_id"}
+    sets, params = [], []
+    for key, col in allowed.items():
+        if key in fields:
+            sets.append(f"{col} = %s")
+            params.append(fields[key])
+    if not sets:
+        return get_user_public(user_id)
+    params.append(user_id)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = %s", params)
+        if cur.rowcount == 0:
+            return None
+    return get_user_public(user_id)
 
 
 def regions(category=None, sido=None) -> dict:
@@ -159,7 +235,9 @@ def inventory_for(institution_id: str) -> list:
             """
             SELECT inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
-                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status
+                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
+                   inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical, inv.mu_forecast,
+                   inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status, inv.zero_stock_reason
             FROM inventory inv JOIN standard_items si ON si.standard_code = inv.standard_code
             WHERE inv.institution_id = %s
             ORDER BY si.standard_code
@@ -181,7 +259,9 @@ def inventory_for_many(institution_ids: list) -> dict:
             """
             SELECT inv.institution_id, inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
-                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status
+                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
+                   inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical, inv.mu_forecast,
+                   inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status, inv.zero_stock_reason
             FROM inventory inv JOIN standard_items si ON si.standard_code = inv.standard_code
             WHERE inv.institution_id = ANY(%s)
             ORDER BY inv.institution_id, si.standard_code
@@ -230,7 +310,9 @@ def inventory_policy_rows(institution=None, status=None, limit=500) -> list:
             SELECT i.id AS institution_id, i.name AS institution_name, i.sido, i.sigungu,
                    inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
-                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status
+                   inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
+                   inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical, inv.mu_forecast,
+                   inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status, inv.zero_stock_reason
             FROM inventory inv
             JOIN institutions i ON i.id = inv.institution_id
             JOIN standard_items si ON si.standard_code = inv.standard_code
@@ -276,24 +358,47 @@ def order_recommendations(institution=None, limit=200) -> list:
     } for r in rows]
 
 
+# on_hand 이상치 판정 임계값. 보건소 단일 품목 재고가 1만 단위를 넘는 경우는
+# 대부분 단위(UoM) 오류로 의심된다(낱개 vs 박스). 실측 1,449행(전체의 0.35%).
+ONHAND_OUTLIER_THRESHOLD = 10_000
+
+
 def dashboard_central_summary() -> dict:
+    """중앙 대시보드 집계.
+
+    ⚠️ totalOnHand 주의 — 화면 대표지표로 쓰지 말 것:
+      단위(UoM)가 다른 품목의 수량을 그대로 합산한 값이다(캔디 '개' + 산소 'L' +
+      파스 '장'을 더한 셈). 이상치를 제외해도 의미가 생기지 않는 구조적 문제다.
+      게다가 실측상 상위 2행이 전체 합의 51.5%를 차지한다
+      ((금연)멘톨캔디 99,999,400 · 임신축하용품 99,997,569 — 단위 오류 의심).
+      중앙값 9 vs 평균 948.6 으로 왜도가 극단적이다.
+      → API 호환을 위해 필드는 유지하되, 대표지표로는 stockoutItems/belowRopItems 를 쓸 것.
+      데이터 품질 검토는 outlierItems 로 규모를 파악한다.
+    """
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) AS n FROM institutions")
         institutions_n = cur.fetchone()["n"]
         cur.execute(
             """
             SELECT sum(on_hand) AS total_on_hand,
-                   count(*) FILTER (WHERE status IN ('BELOW_ROP','CRITICAL')) AS below_rop_items
+                   count(*) FILTER (WHERE status IN ('BELOW_ROP','CRITICAL')) AS below_rop_items,
+                   count(*) FILTER (WHERE on_hand = 0) AS stockout_items,
+                   count(*) FILTER (WHERE on_hand >= %s) AS outlier_items
             FROM inventory
-            """
+            """,
+            (ONHAND_OUTLIER_THRESHOLD,),
         )
         agg = cur.fetchone()
         cur.execute("SELECT count(*) AS n FROM standard_items")
         standard_items_n = cur.fetchone()["n"]
         cur.execute("SELECT count(*) AS n FROM item_groups")
         item_groups_n = cur.fetchone()["n"]
-    return {"institutions": institutions_n, "totalOnHand": agg["total_on_hand"] or 0,
+    return {"institutions": institutions_n,
+            # ⚠️ 단위 혼재 합계 — 대표지표 사용 금지(위 docstring 참조)
+            "totalOnHand": agg["total_on_hand"] or 0,
             "belowRopItems": agg["below_rop_items"] or 0,
+            "stockoutItems": agg["stockout_items"] or 0,
+            "outlierItems": agg["outlier_items"] or 0,
             "standardItems": standard_items_n, "itemGroups": item_groups_n}
 
 
@@ -466,3 +571,126 @@ def dashboard_institution(institution_id: str):
         "inventory": inv,
         "alerts": al,
     }
+
+
+# ===== 재고미달 알림 온디맨드 파생 (backend#53) =====
+# `alerts` 테이블은 2026-07-10 CRITICAL 일부만 1회성 시드된 낡은 스냅샷이라
+# 재적재된 inventory(실재고)와 단절돼 있다. 재고미달 알림은 저장 테이블에
+# 의존하지 않고 조회 시점에 inventory 에서 파생한다(정렬·기관당 상한 적용).
+# alerts 테이블은 사람이 처리상태(승인/해소)를 관리하는 알림 용도로만 남긴다.
+_DERIVED_SHORTAGE_STATUSES = ("CRITICAL", "BELOW_ROP")
+_SEVERITY_BY_STATUS = {"CRITICAL": "CRITICAL", "BELOW_ROP": "WARNING"}
+
+# 휴면 품목(DORMANT: 재고가 있었는데도 안 나감 = 진짜 무수요)은 재고미달 알림에서 제외한다.
+# demand_class 는 ai#25 로 적재되며, 아직 NULL 이면(미적재) 모두 통과한다(IS DISTINCT FROM).
+# → ai 가 demand_class 를 채우면 자동으로 사장재고 알림이 걸러진다. 미적재 상태에선 동작 불변.
+_EXCLUDE_DORMANT = "inv.demand_class IS DISTINCT FROM 'DORMANT'"
+
+
+def shortage_alerts_derived(institution=None, statuses=None,
+                            per_institution=5, limit=200) -> list:
+    """inventory 실재고에서 재고미달 알림을 조회 시점에 파생한다.
+
+    전체 재주문점 미달은 20만 건 규모라 모두 알림화할 수 없으므로,
+    기관당 시급도 상위 `per_institution` 건으로 제한한 뒤 전역 `limit` 을 적용한다.
+    정렬: 상태 심각도(CRITICAL→BELOW_ROP) → 부족분(rop-available) 큰 순.
+    """
+    statuses = tuple(statuses) if statuses else _DERIVED_SHORTAGE_STATUSES
+    clauses = ["inv.status = ANY(%s)", _EXCLUDE_DORMANT]
+    params = [list(statuses)]
+    if institution:
+        clauses.append("inv.institution_id = %s"); params.append(institution)
+    where = " AND ".join(clauses)
+    params.extend([per_institution, limit])
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            WITH ranked AS (
+                SELECT i.id AS institution_id, i.name AS institution_name, i.sido, i.sigungu,
+                       inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
+                       inv.on_hand, inv.available, inv.ss, inv.rop, inv.target,
+                       inv.order_recommendation, inv.supply_risk_level, inv.status,
+                       (inv.rop - inv.available) AS shortage_gap,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY inv.institution_id
+                           ORDER BY CASE inv.status WHEN 'CRITICAL' THEN 0 WHEN 'BELOW_ROP' THEN 1 ELSE 2 END,
+                                    (inv.rop - inv.available) DESC, inv.standard_code
+                       ) AS rn
+                FROM inventory inv
+                JOIN institutions i ON i.id = inv.institution_id
+                JOIN standard_items si ON si.standard_code = inv.standard_code
+                WHERE {where}
+            )
+            SELECT * FROM ranked
+            WHERE rn <= %s
+            ORDER BY CASE status WHEN 'CRITICAL' THEN 0 WHEN 'BELOW_ROP' THEN 1 ELSE 2 END,
+                     shortage_gap DESC, institution_name, standard_code
+            LIMIT %s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+    return [_derived_alert_row(r) for r in rows]
+
+
+def _derived_alert_row(r: dict) -> dict:
+    status = r["status"]
+    return {
+        # 저장 테이블 알림이 아니라 파생 알림임을 alertId 접두사로 구분한다.
+        "alertId": f"derived:{r['institution_id']}:{r['standard_code']}",
+        "alertType": "재고미달",
+        "severity": _SEVERITY_BY_STATUS.get(status, "WARNING"),
+        "institutionId": r["institution_id"], "institutionName": r["institution_name"],
+        "sido": r["sido"], "sigungu": r["sigungu"],
+        "standardCode": r["standard_code"], "standardName": r["standard_name"],
+        "itemGroupId": r["item_group_id"], "criticality": r["criticality"], "uom": r["uom"],
+        "title": f"{r['standard_name']} 재주문점 미달",
+        "message": (
+            f"가용재고 {r['available']} / 재주문점(ROP) {r['rop']} — "
+            f"부족분 {r['shortage_gap']} (상태 {status})"
+        ),
+        "evidence": {
+            "onHand": r["on_hand"], "available": r["available"], "SS": r["ss"],
+            "ROP": r["rop"], "target": r["target"], "shortageGap": r["shortage_gap"],
+            "orderRecommendation": r["order_recommendation"],
+            "supplyRiskLevel": r["supply_risk_level"], "status": status,
+        },
+        # 파생 알림은 저장·해소 이력이 없다(사람이 관리하는 alerts 테이블과 구분).
+        "derived": True, "resolvedAt": None,
+    }
+
+
+def shortage_alerts_summary(institution=None, statuses=None) -> dict:
+    """재고미달 파생 알림의 실제 규모 집계(상태별 건수·기관수·품목수).
+
+    대시보드 openAlerts 가 낡은 시드 30건을 대표값으로 쓰던 문제(backend#53)를
+    바로잡기 위해, 실재고 기준 부족 규모를 그대로 노출한다.
+
+    ※ 대시보드 대표 카운트(belowRopItems 등)는 이미 dashboard_central_summary(#51)가
+      제공하므로, 이 엔드포인트는 그 값과 겹치는 총계용이 아니라 **상태별 기관수·품목수
+      분해**가 필요할 때 쓴다. DORMANT(사장재고)는 위 _EXCLUDE_DORMANT 로 제외되므로,
+      demand_class 적재 후에는 이 집계가 belowRopItems 보다 작아질 수 있다(그게 정상).
+    """
+    statuses = tuple(statuses) if statuses else _DERIVED_SHORTAGE_STATUSES
+    clauses = ["inv.status = ANY(%s)", _EXCLUDE_DORMANT]
+    params = [list(statuses)]
+    if institution:
+        clauses.append("inv.institution_id = %s"); params.append(institution)
+    where = " AND ".join(clauses)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT inv.status,
+                   count(*) AS n,
+                   count(DISTINCT inv.institution_id) AS institutions,
+                   count(DISTINCT inv.standard_code) AS items
+            FROM inventory inv
+            WHERE {where}
+            GROUP BY inv.status
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+    by_status = {r["status"]: {"count": r["n"], "institutions": r["institutions"], "items": r["items"]} for r in rows}
+    total = sum(v["count"] for v in by_status.values())
+    return {"totalShortage": total, "byStatus": by_status}

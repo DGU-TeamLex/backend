@@ -236,8 +236,13 @@ def dashboard_central(_admin: dict = _central_only):
             "standardItems": core["standardItems"],
             "itemGroups": core["itemGroups"],
             "openAlerts": len(open_alerts),
+            # ⚠️ totalOnHand 는 단위(UoM) 혼재 합계라 대표지표로 쓰면 안 된다
+            # (상위 2행이 51.5% 차지 — db/queries.dashboard_central_summary docstring 참조).
+            # 화면에는 stockoutItems / belowRopItems 를 쓸 것.
             "totalOnHand": core["totalOnHand"],
             "belowRopItems": core["belowRopItems"],
+            "stockoutItems": core["stockoutItems"],
+            "outlierItems": core["outlierItems"],
             "criticalRiskGroups": sum(1 for r in D.SUPPLY_RISK if r["level"] == "CRITICAL"),
         },
         "alertsBySeverity": sev,
