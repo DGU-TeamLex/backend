@@ -72,6 +72,12 @@ def health():
 
 
 # ===== 라우터 등록 (기능 추가 시 여기에 두 줄씩) =====
+# ⚠️ derived_alerts 는 wep_stock 보다 먼저 등록한다. wep_stock 의 /alerts/{alert_id} 가
+#    구체 경로 /alerts/derived 를 {alert_id}='derived' 로 가로채기 때문(FastAPI 는 등록 순서로 매칭).
+from routers import derived_alerts  # noqa: E402
+
+app.include_router(derived_alerts.router)
+
 from routers import wep_stock  # noqa: E402
 
 app.include_router(wep_stock.router)
@@ -83,6 +89,10 @@ app.include_router(imports_upload.router)
 from routers import supply_risk_alerts  # noqa: E402
 
 app.include_router(supply_risk_alerts.router)
+
+from routers import user_admin  # noqa: E402
+
+app.include_router(user_admin.router)
 # ===================================================
 
 # ===== GraphQL (REST 병행, 사업수행계획서 4.3.2) =====

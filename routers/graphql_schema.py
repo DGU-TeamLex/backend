@@ -528,8 +528,13 @@ class CentralSummary:
     standard_items: int
     item_groups: int
     open_alerts: int
-    total_on_hand: int
+    total_on_hand: int = strawberry.field(
+        description="⚠️ 단위(UoM) 혼재 합계 — 대표지표 사용 금지. "
+                    "상위 2행이 전체의 51.5%를 차지(단위 오류 의심). "
+                    "화면에는 stockoutItems/belowRopItems 를 쓸 것.")
     below_rop_items: int
+    stockout_items: int = strawberry.field(description="현재고 0 인 기관×품목 건수")
+    outlier_items: int = strawberry.field(description="현재고 1만 이상 — 단위 오류 의심 건수(데이터 품질)")
     critical_risk_groups: int
 
 
@@ -779,6 +784,7 @@ class Query:
                 institutions=core["institutions"], standard_items=core["standardItems"], item_groups=core["itemGroups"],
                 open_alerts=len(open_alerts), total_on_hand=core["totalOnHand"],
                 below_rop_items=core["belowRopItems"],
+                stockout_items=core["stockoutItems"], outlier_items=core["outlierItems"],
                 critical_risk_groups=sum(1 for r in D.SUPPLY_RISK if r["level"] == "CRITICAL"),
             ),
             alerts_by_severity=sev,
