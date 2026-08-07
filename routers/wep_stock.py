@@ -2,9 +2,10 @@
 
 기관·표준품목·품목군·재고·알림·적재이력은 Neon Postgres(db/queries.py)에서
 실데이터로 조회한다(SSIS 제공 실제 물품 입출고 데이터셋, scripts/import_ssis_dataset.py).
-예측(B)/공급위험(C)/외부지표/표준화검수/재배치는 아직 실 파이프라인이 없어
-시드 데이터(wep_data.py)를 그대로 쓴다 — 이 엔드포인트들은 summary 에
-"[MOCK]" 표시가 붙어 있다. 엔드포인트는 명세 모듈별 태그로 그룹화된다.
+예측(B)/공급위험(C)는 ai 레포 서빙 API 배포 전까지 inventory 실데이터(mu_forecast/
+supply_risk_level)를 폴백으로 소비한다(backend#35). 외부지표/표준화검수/재배치는
+대체 가능한 실데이터가 없어 시드 데이터(wep_data.py)를 그대로 쓴다 — 이 엔드포인트들은
+summary 에 "[MOCK]" 표시가 붙어 있다. 엔드포인트는 명세 모듈별 태그로 그룹화된다.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -126,26 +127,29 @@ def std_queue(status: str | None = None, _admin: dict = _central_only):
 
 
 # ===== 모듈 B — 수요 예측 =====
-@router.get("/forecasts", tags=T_B, summary="[MOCK] 수요 예측 목록")
+# backend#35: ai 레포 수요예측 서빙 API 미배포 확인 — 배포 전까지 DB.forecasts_from_inventory()
+# (inventory.mu_forecast, ai#24/#25 산출물)를 폴백으로 소비한다. 응답의 "source" 로 소비 경로를 표시.
+@router.get("/forecasts", tags=T_B, summary="수요 예측 목록(ai 서빙 미배포 — mu_forecast 폴백)")
 def forecasts(institution: str | None = None, _admin: dict = _central_only):
-    items = list(D.FORECASTS.values())
-    if institution:
-        items = [f for f in items if f["institutionId"] == institution]
+    items = DB.forecasts_from_inventory(institution=institution)
     return {"items": items, "totalElements": len(items)}
 
 
-@router.get("/forecasts/{institution_id}/{standard_code}", tags=T_B, summary="[MOCK] 단일 수요 분포(mean+분위수)")
+@router.get("/forecasts/{institution_id}/{standard_code}", tags=T_B, summary="단일 수요 예측(ai 서빙 미배포 — mu_forecast 폴백)")
 def forecast_one(institution_id: str, standard_code: str, _admin: dict = _central_only):
-    f = D.FORECASTS.get((institution_id, standard_code))
+    f = DB.forecast_one_from_inventory(institution_id, standard_code)
     if not f:
         raise HTTPException(404, "forecast not found")
     return f
 
 
 # ===== 모듈 C — 공급위험 경보 =====
-@router.get("/supply-risk", tags=T_C, summary="[MOCK] 품목군 공급위험 현황")
+# backend#35: ai/data 공급위험 점수 서빙 API 미배포 확인 — 배포 전까지 DB.supply_risk_by_group()
+# (inventory.supply_risk_level 실데이터 집계)를 폴백으로 소비한다. 뉴스·원자재 근거(topContributors/
+# evidenceNews)는 ai/data 소유 산출물이라 이 폴백에는 없음 — 대신 실제 고위험 기관 목록을 근거로 제공한다.
+@router.get("/supply-risk", tags=T_C, summary="품목군 공급위험 현황(ai 서빙 미배포 — supply_risk_level 집계 폴백)")
 def supply_risk(level: str | None = None, _admin: dict = _central_only):
-    items = D.SUPPLY_RISK
+    items = DB.supply_risk_by_group()
     if level:
         items = [r for r in items if r["level"] == level]
     name = {g["itemGroupId"]: g["name"] for g in D.ITEM_GROUPS}
@@ -153,12 +157,13 @@ def supply_risk(level: str | None = None, _admin: dict = _central_only):
     return {"items": items, "totalElements": len(items)}
 
 
-@router.get("/supply-risk/{item_group_id}", tags=T_C, summary="[MOCK] 품목군 위험 상세(근거 포함)")
+@router.get("/supply-risk/{item_group_id}", tags=T_C, summary="품목군 위험 상세(ai 서빙 미배포 — 고위험 기관 근거)")
 def supply_risk_one(item_group_id: str, _admin: dict = _central_only):
-    r = D.RISK_BY_GROUP.get(item_group_id)
+    r = DB.supply_risk_group_detail(item_group_id)
     if not r:
         raise HTTPException(404, "item group risk not found")
-    return r
+    name = {g["itemGroupId"]: g["name"] for g in D.ITEM_GROUPS}
+    return {**r, "itemGroupName": name.get(item_group_id, item_group_id)}
 
 
 # ===== 모듈 D — 적정재고 / 발주 / 재배치 (Postgres) =====
@@ -213,7 +218,10 @@ def alert_one(alert_id: str, current_user: dict = Depends(require_role("CENTRAL"
 
 
 # ===== 외부지표 =====
-@router.get("/external-indicators", tags=T_EXT, summary="[MOCK] 외부지표 시계열")
+# backend#35 폴백 정책 결정: 외부지표(원자재 시세·뉴스 위험지수)는 PETRONET·뉴스 등 제3자
+# 소스가 원천이라 backend DB 에 대체 가능한 실데이터가 없다(재고/기관 실적재와 무관한 영역).
+# ai 서빙 API 배포 전까지는 시드값을 유지하는 것으로 폴백 정책을 확정한다 — [MOCK] 표시 유지.
+@router.get("/external-indicators", tags=T_EXT, summary="[MOCK] 외부지표 시계열(ai 서빙 미배포 — 내부 대체 데이터 없음)")
 def external_indicators(_admin: dict = _central_only):
     return {"items": D.EXTERNAL_INDICATORS, "totalElements": len(D.EXTERNAL_INDICATORS)}
 
