@@ -43,6 +43,8 @@ def login(body: LoginBody):
     user = DB.get_user_by_email(body.email)
     if not user or not verify_password(body.password, user["passwordHash"]):
         raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다.")
+    if not user.get("isActive", True):
+        raise HTTPException(status_code=403, detail="비활성화된 계정입니다. 관리자에게 문의하세요.")
     token = create_access_token(user)
     return {
         "accessToken": token,

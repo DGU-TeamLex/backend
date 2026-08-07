@@ -91,6 +91,8 @@ def _user_row(r: dict) -> dict:
     return {
         "id": r["id"], "email": r["email"], "passwordHash": r["password_hash"],
         "name": r["name"], "role": r["role"], "institutionId": r["institution_id"],
+        # 미이행(ALTER 안 된) DB 도 로그인 가능하도록 컬럼 부재 시 활성으로 간주.
+        "isActive": r.get("is_active", True),
     }
 
 
@@ -108,13 +110,14 @@ def _user_public_row(r: dict) -> dict:
     return {
         "id": r["id"], "email": r["email"], "name": r["name"], "role": r["role"],
         "institutionId": r["institution_id"], "institutionName": r.get("institution_name"),
+        "isActive": r.get("is_active", True),
         "createdAt": r["created_at"].isoformat() if r.get("created_at") else None,
     }
 
 
 _USER_PUBLIC_SELECT = """
     SELECT u.id, u.email, u.name, u.role, u.institution_id,
-           i.name AS institution_name, u.created_at
+           i.name AS institution_name, u.is_active, u.created_at
     FROM users u LEFT JOIN institutions i ON i.id = u.institution_id
 """
 
@@ -148,7 +151,8 @@ def create_user(user_id, email, password_hash, name, role, institution_id=None) 
 def update_user(user_id: str, fields: dict):
     """계정 부분 수정(이름·역할·소속기관). fields 에 담긴 허용 키만 반영한다.
     대상 계정이 없으면 None 을 반환한다(호출부에서 404 처리)."""
-    allowed = {"name": "name", "role": "role", "institutionId": "institution_id"}
+    allowed = {"name": "name", "role": "role", "institutionId": "institution_id",
+               "isActive": "is_active"}
     sets, params = [], []
     for key, col in allowed.items():
         if key in fields:
