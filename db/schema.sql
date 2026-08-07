@@ -78,8 +78,13 @@ CREATE TABLE IF NOT EXISTS users (
     name TEXT NOT NULL,
     role TEXT NOT NULL,
     institution_id TEXT,
+    -- is_active=false 면 관리자 콘솔에서 비활성화된 계정 — 로그인 거부(이슈 #25 PATCH).
+    is_active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 기존(이미 CREATE 된) DB 도 컬럼을 얻도록 멱등 마이그레이션. seed_db.py 가 schema.sql
+-- 전체를 실행하므로 재적재 시 자동 반영된다.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
 -- 적재 배치 이력 (데이터 인테이크). scripts/import_ssis_dataset.py 등 실제
