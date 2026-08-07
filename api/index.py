@@ -86,6 +86,10 @@ from routers import imports_upload  # noqa: E402
 
 app.include_router(imports_upload.router)
 
+from routers import supply_risk_alerts  # noqa: E402
+
+app.include_router(supply_risk_alerts.router)
+
 from routers import order_reco_detail  # noqa: E402
 
 app.include_router(order_reco_detail.router)
