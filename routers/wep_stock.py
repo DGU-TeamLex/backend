@@ -244,6 +244,8 @@ def dashboard_central(_admin: dict = _central_only):
             "totalOnHand": core["totalOnHand"],
             "belowRopItems": core["belowRopItems"],
             "stockoutItems": core["stockoutItems"],
+            # 재고 0 이지만 결품이 아닌 건(미운영·데이터누락, ai#38). 결품과 구분해 표기할 것.
+            "notOperatedItems": core["notOperatedItems"],
             "outlierItems": core["outlierItems"],
             "criticalRiskGroups": sum(1 for r in D.SUPPLY_RISK if r["level"] == "CRITICAL"),
         },
