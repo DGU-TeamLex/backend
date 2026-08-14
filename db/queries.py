@@ -17,40 +17,53 @@ def _inst_row(r: dict) -> dict:
     }
 
 
-# 리드타임 추정 정책 (ai `data/mapping/supply_risk_level_policy.json` 과 같은 값).
-# 여기 상수가 그쪽과 갈라지면 화면 설명이 거짓이 되므로 바꿀 때 같이 고쳐야 한다.
-LEAD_TIME_METHOD = "stockout_duration_p25"
-LEAD_TIME_FALLBACK_DAYS = 15.0
-LEAD_TIME_MAX_DAYS = 120.0
-LEAD_TIME_MIN_DAYS = 1.0
-# 조달청 납품요구 24개월 30,815건 실측(계약 납기). 우리 추정값과 대조용 기준선이다.
-CONTRACT_LEAD_TIME_MEDIAN_DAYS = 30.0
+# 리드타임 산정 근거 (2026-08-14 교체).
+#
+# 종전에는 `stockout_duration_p25`(재고소진기간 p25)를 조달 소요일의 대용으로
+# 썼다. 그 값은 검증된 적이 없다 — "재고가 0 이던 기간" 에는 발주를 안 한 기간도
+# 섞이고, 실제 발주-입고 기록이 아니다.
+#
+# 지금은 **조달청 납품요구 실측** 을 쓴다. 24개월 전수 30,815건의 계약 납기다.
+#
+#     p50 30   p60 30   p70 30   p75 30   p80 31   p90 60   p95 94
+#
+# 위험등급으로 분위수를 고른다. 절대 점수가 아니라 등급을 쓰는 이유는 점수의
+# 절대 척도가 신호 결합 방식에 따라 임의로 정해지기 때문이다(ai#20 결함 O).
+LEAD_TIME_METHOD = "contract_lead_time_quantile"
+LEAD_TIME_BASIS_SAMPLES = 30815
+LEAD_TIME_BASIS_MONTHS = 24
+# 등급 → (분위수, 일수). apply_contract_lead_time.py 와 같은 값이어야 한다.
+LEAD_TIME_BY_LEVEL = {
+    "NORMAL": (50, 30.0),
+    "CAUTION": (75, 30.0),
+    "WARNING": (90, 60.0),
+    "CRITICAL": (95, 94.0),
+}
+# 정기검토 주기 (ai#54). 보호기간은 R + L 이다.
+REVIEW_PERIOD_DAYS = 30.0
 
 
 def _lead_time_provenance(r: dict) -> dict:
-    """리드타임 값의 출처·보정 여부를 화면이 설명할 수 있게 만든다.
+    """리드타임이 어디서 나온 값인지 화면이 설명할 수 있게 만든다.
 
-    `lead_time_used` 는 조달청 계약 납기가 아니라 **재고소진기간 p25** 다.
-    두 값은 정의가 달라서 서로 비교하면 안 되는데, 화면에 숫자만 나오면
-    담당자는 "왜 30일보다 짧은가" 를 알 수 없다.
+    숫자만 주면 "왜 30일인가 / 왜 60일인가" 를 알 수 없다. 어느 분위수를 썼고
+    그 분위수가 무슨 표본에서 나왔는지까지 같이 내린다.
     """
+    level = r.get("supply_risk_level") or "NORMAL"
+    quantile, expected = LEAD_TIME_BY_LEVEL.get(level, LEAD_TIME_BY_LEVEL["NORMAL"])
     value = r.get("lead_time_used")
-    capped = bool(r.get("lead_time_policy_capped"))
-    is_fallback = value is not None and abs(float(value) - LEAD_TIME_FALLBACK_DAYS) < 1e-9
-    if is_fallback:
-        source = "fallback"
-    elif capped:
-        source = "capped"
-    else:
-        source = "estimated"
+    # DB 값이 정책과 어긋나면 화면 설명이 거짓이 된다. 그 사실을 숨기지 않는다.
+    consistent = value is not None and abs(float(value) - expected) < 1e-9
     return {
-        "leadTimeSource": source,
+        "leadTimeSource": "contract_quantile" if consistent else "stale",
         "leadTimeMethod": LEAD_TIME_METHOD,
-        "leadTimeFallbackDays": LEAD_TIME_FALLBACK_DAYS,
-        "leadTimeMaxDays": LEAD_TIME_MAX_DAYS,
-        "leadTimeMinDays": LEAD_TIME_MIN_DAYS,
-        "leadTimeCapped": capped,
-        "contractLeadTimeMedianDays": CONTRACT_LEAD_TIME_MEDIAN_DAYS,
+        "leadTimeQuantile": quantile,
+        "leadTimeBasisSamples": LEAD_TIME_BASIS_SAMPLES,
+        "leadTimeBasisMonths": LEAD_TIME_BASIS_MONTHS,
+        "reviewPeriodDays": REVIEW_PERIOD_DAYS,
+        "protectionPeriodDays": (
+            REVIEW_PERIOD_DAYS + float(value) if value is not None else None
+        ),
     }
 
 
@@ -60,15 +73,12 @@ def _inv_row(r: dict) -> dict:
         "itemGroupId": r["item_group_id"], "criticality": r["criticality"], "uom": r["uom"],
         "onHand": r["on_hand"], "available": r["available"], "mu": r["mu"], "sigma": r["sigma"],
         "leadTimeUsed": r["lead_time_used"], "zUsed": r["z_used"], "SS": r["ss"], "ROP": r["rop"],
-        # 리드타임이 **어디서 나온 값인지**. 숫자만 주면 화면이 "왜 이 날짜인지"를
-        # 설명할 수 없다. 실측상 79.8% 가 30일 미만인데, 그 이유가 안 보이면
-        # 담당자는 시스템이 임의로 30일 안쪽에 묶는다고 오해한다.
+        # 리드타임이 **어디서 나온 값인지**. 숫자만 주면 화면이 "왜 30일인가 /
+        # 왜 60일인가" 를 설명할 수 없다.
         #
-        #   방법     재고소진기간 p25 (stockout_duration_p25)
-        #            = "재고가 0 이던 기간의 하위 25%" 를 조달 소요일의 대용으로 쓴다.
-        #            조달청 계약 납기(median 30일)와는 **다른 정의** 다.
-        #   폴백     추정 불가 시 15일. 실측 8,999행(2.2%)
-        #   상한     120일. 넘던 8,183행(2.0%)은 잘렸다(원래 최대 547.5일)
+        #   방법   조달청 납품요구 계약 납기 분위수 (24개월 전수 30,815건)
+        #   선택   위험등급 → 분위수   NORMAL p50 / CAUTION p75
+        #                             WARNING p90 / CRITICAL p95
         **_lead_time_provenance(r),
         "target": r["target"], "orderRecommendation": r["order_recommendation"],
         # NULL = 권고량 산출 불가(사유는 orderSuppressReason). 0 = 발주 대상 아님. 둘을 구분해야 한다.
