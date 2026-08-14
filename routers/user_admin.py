@@ -73,6 +73,38 @@ def update_user(user_id: str, body: UpdateUserBody, current_user: dict = _centra
     fields = body.model_dump(exclude_unset=True)
     if "role" in fields:
         _validate_role(fields["role"])
+
+    existing = DB.get_user_public(user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="해당 계정을 찾을 수 없습니다.")
+
+    # 생성(POST)에는 있는 검증이 수정(PATCH)에는 없었다. 그래서 화면에서 역할만
+    # 바꾸면(`{"role": "INSTITUTION"}`) 소속기관 없는 INSTITUTION 계정이 만들어진다.
+    # 그 계정은 로그인은 되지만 자기 기관 데이터를 못 본다 — 조용히 망가진 상태다.
+    final_role = fields.get("role", existing.get("role"))
+    final_institution = (
+        fields["institutionId"] if "institutionId" in fields else existing.get("institutionId")
+    )
+    if final_role == "INSTITUTION" and not final_institution:
+        raise HTTPException(
+            status_code=422,
+            detail="INSTITUTION 역할은 소속기관이 필요합니다. institutionId 를 함께 보내세요.",
+        )
+    # 반대 방향도 정리한다. CENTRAL 은 특정 기관에 매이지 않는다.
+    if final_role == "CENTRAL" and final_institution:
+        fields["institutionId"] = None
+
+    # 마지막 CENTRAL 계정의 역할을 내리거나 비활성화하면 관리자 콘솔에
+    # 아무도 못 들어간다. 되돌릴 방법이 없으므로 막는다.
+    losing_central = existing.get("role") == "CENTRAL" and (
+        final_role != "CENTRAL" or fields.get("isActive") is False
+    )
+    if losing_central and DB.count_active_central_users() <= 1:
+        raise HTTPException(
+            status_code=409,
+            detail="마지막 중앙 관리자 계정입니다. 다른 CENTRAL 계정을 먼저 만드세요.",
+        )
+
     updated = DB.update_user(user_id, fields)
     if updated is None:
         raise HTTPException(status_code=404, detail="해당 계정을 찾을 수 없습니다.")

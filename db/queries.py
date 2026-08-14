@@ -200,6 +200,20 @@ def create_user(user_id, email, password_hash, name, role, institution_id=None) 
     return get_user_public(user_id)
 
 
+def count_active_central_users() -> int:
+    """활성 CENTRAL 계정 수.
+
+    마지막 관리자의 역할을 내리거나 비활성화하면 관리자 콘솔에 아무도 못 들어가고
+    되돌릴 방법이 없다. 그걸 막기 위한 확인용이다.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM users "
+            "WHERE role = 'CENTRAL' AND coalesce(is_active, true)"
+        )
+        return int(cur.fetchone()["n"])
+
+
 def update_user(user_id: str, fields: dict):
     """계정 부분 수정(이름·역할·소속기관). fields 에 담긴 허용 키만 반영한다.
     대상 계정이 없으면 None 을 반환한다(호출부에서 404 처리)."""
