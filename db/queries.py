@@ -354,7 +354,14 @@ def order_recommendations(institution=None, limit=200) -> list:
             f"""
             SELECT i.id AS institution_id, i.name AS institution_name,
                    inv.standard_code, si.standard_name, inv.available, inv.rop, inv.target,
-                   inv.order_recommendation, si.uom, inv.supply_risk_level, inv.status
+                   inv.order_recommendation, si.uom, inv.supply_risk_level, inv.status,
+                   -- 권고량의 근거를 같이 내린다. 숫자만 주면 화면이 "왜 이 수량인지"를
+                   -- 설명할 수 없고, 담당자가 근거 없이 발주하게 된다(ai#52).
+                   --   mu_is_floored          수요가 추정치인지 바닥값인지. 실측 72.42% 가 바닥값이다.
+                   --   order_suppress_reason  억제 사유 (DORMANT/NOT_OPERATED/DATA_MISSING/STALE)
+                   --   raw_order_recommendation 억제 전 원시 권고량
+                   inv.mu_is_floored, inv.order_suppress_reason,
+                   inv.raw_order_recommendation, inv.demand_class
             FROM inventory inv
             JOIN institutions i ON i.id = inv.institution_id
             JOIN standard_items si ON si.standard_code = inv.standard_code
@@ -370,6 +377,10 @@ def order_recommendations(institution=None, limit=200) -> list:
         "standardCode": r["standard_code"], "standardName": r["standard_name"], "available": r["available"],
         "ROP": r["rop"], "target": r["target"], "recommendedQty": r["order_recommendation"], "uom": r["uom"],
         "supplyRiskLevel": r["supply_risk_level"], "status": r["status"],
+        "muIsFloored": r.get("mu_is_floored"),
+        "orderSuppressReason": r.get("order_suppress_reason"),
+        "rawOrderRecommendation": r.get("raw_order_recommendation"),
+        "demandClass": r.get("demand_class"),
     } for r in rows]
 
 
