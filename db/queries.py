@@ -17,12 +17,59 @@ def _inst_row(r: dict) -> dict:
     }
 
 
+# 리드타임 추정 정책 (ai `data/mapping/supply_risk_level_policy.json` 과 같은 값).
+# 여기 상수가 그쪽과 갈라지면 화면 설명이 거짓이 되므로 바꿀 때 같이 고쳐야 한다.
+LEAD_TIME_METHOD = "stockout_duration_p25"
+LEAD_TIME_FALLBACK_DAYS = 15.0
+LEAD_TIME_MAX_DAYS = 120.0
+LEAD_TIME_MIN_DAYS = 1.0
+# 조달청 납품요구 24개월 30,815건 실측(계약 납기). 우리 추정값과 대조용 기준선이다.
+CONTRACT_LEAD_TIME_MEDIAN_DAYS = 30.0
+
+
+def _lead_time_provenance(r: dict) -> dict:
+    """리드타임 값의 출처·보정 여부를 화면이 설명할 수 있게 만든다.
+
+    `lead_time_used` 는 조달청 계약 납기가 아니라 **재고소진기간 p25** 다.
+    두 값은 정의가 달라서 서로 비교하면 안 되는데, 화면에 숫자만 나오면
+    담당자는 "왜 30일보다 짧은가" 를 알 수 없다.
+    """
+    value = r.get("lead_time_used")
+    capped = bool(r.get("lead_time_policy_capped"))
+    is_fallback = value is not None and abs(float(value) - LEAD_TIME_FALLBACK_DAYS) < 1e-9
+    if is_fallback:
+        source = "fallback"
+    elif capped:
+        source = "capped"
+    else:
+        source = "estimated"
+    return {
+        "leadTimeSource": source,
+        "leadTimeMethod": LEAD_TIME_METHOD,
+        "leadTimeFallbackDays": LEAD_TIME_FALLBACK_DAYS,
+        "leadTimeMaxDays": LEAD_TIME_MAX_DAYS,
+        "leadTimeMinDays": LEAD_TIME_MIN_DAYS,
+        "leadTimeCapped": capped,
+        "contractLeadTimeMedianDays": CONTRACT_LEAD_TIME_MEDIAN_DAYS,
+    }
+
+
 def _inv_row(r: dict) -> dict:
     return {
         "standardCode": r["standard_code"], "standardName": r["standard_name"],
         "itemGroupId": r["item_group_id"], "criticality": r["criticality"], "uom": r["uom"],
         "onHand": r["on_hand"], "available": r["available"], "mu": r["mu"], "sigma": r["sigma"],
         "leadTimeUsed": r["lead_time_used"], "zUsed": r["z_used"], "SS": r["ss"], "ROP": r["rop"],
+        # 리드타임이 **어디서 나온 값인지**. 숫자만 주면 화면이 "왜 이 날짜인지"를
+        # 설명할 수 없다. 실측상 79.8% 가 30일 미만인데, 그 이유가 안 보이면
+        # 담당자는 시스템이 임의로 30일 안쪽에 묶는다고 오해한다.
+        #
+        #   방법     재고소진기간 p25 (stockout_duration_p25)
+        #            = "재고가 0 이던 기간의 하위 25%" 를 조달 소요일의 대용으로 쓴다.
+        #            조달청 계약 납기(median 30일)와는 **다른 정의** 다.
+        #   폴백     추정 불가 시 15일. 실측 8,999행(2.2%)
+        #   상한     120일. 넘던 8,183행(2.0%)은 잘렸다(원래 최대 547.5일)
+        **_lead_time_provenance(r),
         "target": r["target"], "orderRecommendation": r["order_recommendation"],
         # NULL = 권고량 산출 불가(사유는 orderSuppressReason). 0 = 발주 대상 아님. 둘을 구분해야 한다.
         "orderSuppressReason": r.get("order_suppress_reason"),
@@ -246,7 +293,7 @@ def inventory_for(institution_id: str) -> list:
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
                    inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
                    inv.order_suppress_reason, inv.raw_order_recommendation,
-                   inv.mu_is_floored, inv.sigma_is_floored,
+                   inv.mu_is_floored, inv.sigma_is_floored, inv.lead_time_policy_capped,
                    inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical, inv.mu_forecast,
                    inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status, inv.zero_stock_reason
             FROM inventory inv JOIN standard_items si ON si.standard_code = inv.standard_code
@@ -272,7 +319,7 @@ def inventory_for_many(institution_ids: list) -> dict:
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
                    inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
                    inv.order_suppress_reason, inv.raw_order_recommendation,
-                   inv.mu_is_floored, inv.sigma_is_floored,
+                   inv.mu_is_floored, inv.sigma_is_floored, inv.lead_time_policy_capped,
                    inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical, inv.mu_forecast,
                    inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status, inv.zero_stock_reason
             FROM inventory inv JOIN standard_items si ON si.standard_code = inv.standard_code
@@ -325,7 +372,7 @@ def inventory_policy_rows(institution=None, status=None, limit=500) -> list:
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
                    inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
                    inv.order_suppress_reason, inv.raw_order_recommendation,
-                   inv.mu_is_floored, inv.sigma_is_floored,
+                   inv.mu_is_floored, inv.sigma_is_floored, inv.lead_time_policy_capped,
                    inv.mu_corrected, inv.demand_class, inv.demand_pattern, inv.is_medical, inv.mu_forecast,
                    inv.item_family_id, inv.family_available, inv.family_codes, inv.family_status, inv.zero_stock_reason
             FROM inventory inv
