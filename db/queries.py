@@ -11,9 +11,12 @@ from .connection import get_conn
 
 
 def _inst_row(r: dict) -> dict:
+    # sido/sigungu 는 노출하지 않는다 — institutions.id(inst_XXXX)가 실명목록에
+    # 정렬 순서로 임의 매핑된 값이라(#75, #16) 지역 정보도 그 부정확성을 물려받는다.
+    # 대신 정보원이 원문으로 제공한 institutionCode(보건기관코드_en)를 내린다.
     return {
         "id": r["id"], "name": r["name"], "type": r["type"], "category": r["category"],
-        "sido": r["sido"], "sigungu": r["sigungu"], "island": r["island"],
+        "island": r["island"], "institutionCode": r.get("institution_code"),
     }
 
 
@@ -244,17 +247,9 @@ def update_user(user_id: str, fields: dict):
     return get_user_public(user_id)
 
 
-def regions(category=None, sido=None) -> dict:
-    where, params = _where(category=category, sido=sido)
-    with get_conn() as conn, conn.cursor() as cur:
-        if not sido:
-            cur.execute(f"SELECT sido AS name, count(*) AS count FROM institutions{where} GROUP BY sido", params)
-            return {"level": "sido", "items": [dict(r) for r in cur.fetchall()]}
-        cur.execute(
-            f"SELECT sigungu AS name, count(*) AS count FROM institutions{where} GROUP BY sigungu ORDER BY sigungu",
-            params,
-        )
-        return {"level": "sigungu", "sido": sido, "items": [dict(r) for r in cur.fetchall()]}
+# regions() 는 2026-08-17 제거됐다(이슈 #75) — 시도/시군구는 institutions.id 의
+# 임의매핑에 얹힌 지역 축이라 정보원 대응표 제공 예정이 없어 영구 비활성 대상이다.
+# (구 /facility-regions REST·GraphQL 엔드포인트의 유일한 소비원이었다.)
 
 
 def _summaries_for(institution_ids: list) -> dict:
@@ -391,7 +386,7 @@ def inventory_policy_rows(institution=None, status=None, limit=500) -> list:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT i.id AS institution_id, i.name AS institution_name, i.sido, i.sigungu,
+            SELECT i.id AS institution_id, i.institution_code,
                    inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
                    inv.on_hand, inv.available, inv.mu, inv.sigma, inv.lead_time_used, inv.z_used,
                    inv.ss, inv.rop, inv.target, inv.order_recommendation, inv.supply_risk_level, inv.status,
@@ -404,14 +399,15 @@ def inventory_policy_rows(institution=None, status=None, limit=500) -> list:
             JOIN standard_items si ON si.standard_code = inv.standard_code
             WHERE 1=1{where}
             ORDER BY CASE inv.status WHEN 'CRITICAL' THEN 0 WHEN 'BELOW_ROP' THEN 1 WHEN 'WATCH' THEN 2 ELSE 3 END,
-                     i.name, inv.standard_code
+                     i.id, inv.standard_code
             {order_limit}
             """,
             params,
         )
         rows = cur.fetchall()
-    return [{**_inv_row(r), "institutionId": r["institution_id"], "institutionName": r["institution_name"],
-             "sido": r["sido"], "sigungu": r["sigungu"]} for r in rows]
+    # institutionName/sido/sigungu 는 더 이상 내리지 않는다(#75) — institutionCode
+    # (보건기관코드_en, scripts/backfill_institution_code.py 로 채움)로 대체한다.
+    return [{**_inv_row(r), "institutionId": r["institution_id"], "institutionCode": r["institution_code"]} for r in rows]
 
 
 def order_recommendations(institution=None, limit=200) -> list:
@@ -423,7 +419,7 @@ def order_recommendations(institution=None, limit=200) -> list:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT i.id AS institution_id, i.name AS institution_name,
+            SELECT i.id AS institution_id, i.institution_code,
                    inv.standard_code, si.standard_name, inv.available, inv.rop, inv.target,
                    inv.order_recommendation, si.uom, inv.supply_risk_level, inv.status,
                    -- 권고량의 근거를 같이 내린다. 숫자만 주면 화면이 "왜 이 수량인지"를
@@ -443,8 +439,9 @@ def order_recommendations(institution=None, limit=200) -> list:
             params,
         )
         rows = cur.fetchall()
+    # institutionName 대신 institutionCode 를 내린다(#75).
     return [{
-        "institutionId": r["institution_id"], "institutionName": r["institution_name"],
+        "institutionId": r["institution_id"], "institutionCode": r["institution_code"],
         "standardCode": r["standard_code"], "standardName": r["standard_name"], "available": r["available"],
         "ROP": r["rop"], "target": r["target"], "recommendedQty": r["order_recommendation"], "uom": r["uom"],
         "supplyRiskLevel": r["supply_risk_level"], "status": r["status"],
@@ -547,19 +544,20 @@ def supply_risk_group_detail(item_group_id: str):
         [group] = _aggregate_group_risk(rows)
         cur.execute(
             """
-            SELECT i.id AS institution_id, i.name AS institution_name, count(*) AS n
+            SELECT i.id AS institution_id, i.institution_code, count(*) AS n
             FROM inventory inv
             JOIN standard_items si ON si.standard_code = inv.standard_code
             JOIN institutions i ON i.id = inv.institution_id
             WHERE si.item_group_id = %s AND inv.supply_risk_level IN ('CRITICAL', 'WARNING')
-            GROUP BY i.id, i.name
+            GROUP BY i.id, i.institution_code
             ORDER BY n DESC
             LIMIT 10
             """,
             (item_group_id,),
         )
+        # institutionName 대신 institutionCode 를 내린다(#75).
         group["topInstitutions"] = [
-            {"institutionId": r["institution_id"], "institutionName": r["institution_name"], "highRiskItems": r["n"]}
+            {"institutionId": r["institution_id"], "institutionCode": r["institution_code"], "highRiskItems": r["n"]}
             for r in cur.fetchall()
         ]
     return group
@@ -592,8 +590,9 @@ def relocation_candidates(limit=100) -> list:
     기준으로 매칭한 재배치 제안 — 실재고(Neon Postgres) 기반. 부족분(target-available)과
     여유분(available-target) 중 작은 쪽을 제안 수량으로 삼는다.
 
-    같은 시도(sido)를 우선 매칭하지만, 기관코드↔실명 매핑이 아직 정렬순서 임의매핑이라
-    (#16) 시도 정보 자체의 신뢰도가 낮다 — 응답의 sameSidoTentative 로 명시한다.
+    시도(sido) 우선 매칭은 제거했다(#75) — 기관코드↔실명 매핑이 정렬순서 임의매핑이라
+    (#16) 시도 정보 자체에 근거가 없어, 그 위에 우선순위를 얹는 것도 근거가 없었다.
+    이제는 여유분(surplus_qty) 큰 순으로만 매칭한다.
     유효기간(로트) 데이터가 원본에 없어 FEFO(유효기간 임박 우선) 기준은 적용하지 못했다."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -613,14 +612,10 @@ def relocation_candidates(limit=100) -> list:
             matched AS (
                 SELECT DISTINCT ON (n.institution_id, n.standard_code)
                        n.institution_id AS to_institution, s.institution_id AS from_institution,
-                       n.standard_code, n.shortfall, s.surplus_qty,
-                       ni.sido AS to_sido, si2.sido AS from_sido
+                       n.standard_code, n.shortfall, s.surplus_qty
                 FROM need n
                 JOIN surplus s ON s.standard_code = n.standard_code AND s.institution_id <> n.institution_id
-                JOIN institutions ni ON ni.id = n.institution_id
-                JOIN institutions si2 ON si2.id = s.institution_id
-                ORDER BY n.institution_id, n.standard_code,
-                         (ni.sido = si2.sido) DESC, s.surplus_qty DESC
+                ORDER BY n.institution_id, n.standard_code, s.surplus_qty DESC
             )
             SELECT m.*, st.standard_name, st.uom
             FROM matched m
@@ -634,13 +629,12 @@ def relocation_candidates(limit=100) -> list:
     out = []
     for i, r in enumerate(rows, start=1):
         qty = min(r["shortfall"], r["surplus_qty"])
-        same_sido = r["from_sido"] is not None and r["from_sido"] == r["to_sido"]
         out.append({
             "id": f"rl_derived_{i}",
             "fromInstitution": r["from_institution"], "toInstitution": r["to_institution"],
             "standardCode": r["standard_code"], "standardName": r["standard_name"], "uom": r["uom"],
-            "suggestedQty": qty, "sameSido": same_sido, "sameSidoTentative": True,
-            "reason": "같은 시도 여유 재고 매칭" if same_sido else "전국 여유 재고 매칭(권역 정보 잠정)",
+            "suggestedQty": qty,
+            "reason": "전국 여유 재고 매칭",
             "status": "제안",
         })
     return out
@@ -747,17 +741,18 @@ def top_shortage_institutions(n=8) -> list:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT i.id AS institution_id, i.name AS institution_name,
+            SELECT i.id AS institution_id, i.institution_code,
                    count(*) AS shortage_items
             FROM inventory inv JOIN institutions i ON i.id = inv.institution_id
             WHERE inv.status IN ('BELOW_ROP','CRITICAL')
-            GROUP BY i.id, i.name
+            GROUP BY i.id, i.institution_code
             ORDER BY shortage_items DESC
             LIMIT %s
             """,
             (n,),
         )
-        return [{"institutionId": r["institution_id"], "institutionName": r["institution_name"],
+        # institutionName 대신 institutionCode 를 내린다(#75).
+        return [{"institutionId": r["institution_id"], "institutionCode": r["institution_code"],
                   "shortageItems": r["shortage_items"]} for r in cur.fetchall()]
 
 
@@ -775,7 +770,7 @@ def alerts_list(severity=None, alert_type=None, resolved=None, institution=None)
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT a.alert_id, a.alert_type, a.severity, a.institution_id, i.name AS institution_name,
+            SELECT a.alert_id, a.alert_type, a.severity, a.institution_id, i.institution_code,
                    a.title, a.message, a.evidence, a.generated_at, a.resolved_at
             FROM alerts a LEFT JOIN institutions i ON i.id = a.institution_id
             {where}
@@ -791,7 +786,7 @@ def alert_one(alert_id: str):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT a.alert_id, a.alert_type, a.severity, a.institution_id, i.name AS institution_name,
+            SELECT a.alert_id, a.alert_type, a.severity, a.institution_id, i.institution_code,
                    a.title, a.message, a.evidence, a.generated_at, a.resolved_at
             FROM alerts a LEFT JOIN institutions i ON i.id = a.institution_id
             WHERE a.alert_id = %s
@@ -803,9 +798,10 @@ def alert_one(alert_id: str):
 
 
 def _alert_row(r: dict) -> dict:
+    # institutionName 대신 institutionCode 를 내린다(#75).
     return {
         "alertId": r["alert_id"], "alertType": r["alert_type"], "severity": r["severity"],
-        "institutionId": r["institution_id"], "institutionName": r["institution_name"],
+        "institutionId": r["institution_id"], "institutionCode": r.get("institution_code"),
         "title": r["title"], "message": r["message"], "evidence": r["evidence"],
         "generatedAt": r["generated_at"].isoformat(), "resolvedAt": r["resolved_at"].isoformat() if r["resolved_at"] else None,
     }
@@ -912,7 +908,7 @@ def shortage_alerts_derived(institution=None, statuses=None,
         cur.execute(
             f"""
             WITH ranked AS (
-                SELECT i.id AS institution_id, i.name AS institution_name, i.sido, i.sigungu,
+                SELECT i.id AS institution_id, i.institution_code,
                        inv.standard_code, si.standard_name, si.item_group_id, si.criticality, si.uom,
                        inv.on_hand, inv.available, inv.ss, inv.rop, inv.target,
                        inv.order_recommendation, inv.supply_risk_level, inv.status,
@@ -930,7 +926,7 @@ def shortage_alerts_derived(institution=None, statuses=None,
             SELECT * FROM ranked
             WHERE rn <= %s
             ORDER BY CASE status WHEN 'CRITICAL' THEN 0 WHEN 'BELOW_ROP' THEN 1 ELSE 2 END,
-                     shortage_gap DESC, institution_name, standard_code
+                     shortage_gap DESC, institution_id, standard_code
             LIMIT %s
             """,
             params,
@@ -941,13 +937,13 @@ def shortage_alerts_derived(institution=None, statuses=None,
 
 def _derived_alert_row(r: dict) -> dict:
     status = r["status"]
+    # institutionName/sido/sigungu 대신 institutionCode 를 내린다(#75).
     return {
         # 저장 테이블 알림이 아니라 파생 알림임을 alertId 접두사로 구분한다.
         "alertId": f"derived:{r['institution_id']}:{r['standard_code']}",
         "alertType": "재고미달",
         "severity": _SEVERITY_BY_STATUS.get(status, "WARNING"),
-        "institutionId": r["institution_id"], "institutionName": r["institution_name"],
-        "sido": r["sido"], "sigungu": r["sigungu"],
+        "institutionId": r["institution_id"], "institutionCode": r.get("institution_code"),
         "standardCode": r["standard_code"], "standardName": r["standard_name"],
         "itemGroupId": r["item_group_id"], "criticality": r["criticality"], "uom": r["uom"],
         "title": f"{r['standard_name']} 재주문점 미달",

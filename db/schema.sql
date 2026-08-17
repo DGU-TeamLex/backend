@@ -282,3 +282,14 @@ ALTER TABLE inventory ADD COLUMN IF NOT EXISTS raw_order_recommendation INTEGER;
 ALTER TABLE inventory ADD COLUMN IF NOT EXISTS order_suppress_reason TEXT;
 ALTER TABLE inventory ADD COLUMN IF NOT EXISTS mu_is_floored BOOLEAN;
 ALTER TABLE inventory ADD COLUMN IF NOT EXISTS sigma_is_floored BOOLEAN;
+
+-- ===== 기관 실명 표기 중단 → 보건기관코드_en 키 전환 (이슈 #75, #16) =====
+-- institutions.id(inst_XXXX)는 익명 기관코드 3,530개를 보건복지부 실명목록과
+-- '정렬 순서로 1:1 임의 매핑'한 값이라(scripts/import_ssis_dataset.py) 실제 신원과
+-- 대응한다는 보장이 없고, 연도별 자료를 추가 적재하면 조용히 어긋난다(실측 재현율 0.71%).
+-- 정보원이 원문으로 제공한 `보건기관코드_en`(익명화 코드 원문, 예: "D3;34")을 그대로
+-- 보존해 화면·API 가 실명/지역 대신 이 코드를 안정적인 키로 쓸 수 있게 한다.
+-- 값 채우기는 scripts/backfill_institution_code.py (기존 매핑의 '정렬 역산') 참고 —
+-- 원장 재적재(#39) 전까지의 임시 조치이며, DB 재적재를 하지 않는다.
+ALTER TABLE institutions ADD COLUMN IF NOT EXISTS institution_code TEXT;
+CREATE INDEX IF NOT EXISTS idx_institutions_code ON institutions(institution_code);
