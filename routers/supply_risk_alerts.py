@@ -59,8 +59,8 @@ def _build_alerts(min_rank: int, institution: str | None) -> list:
         seen.add(key)
         alerts.append({
             "institutionId": r["institutionId"],
-            "institutionName": r.get("institutionName"),
-            "sido": r.get("sido"),
+            # institutionName/sido 대신 institutionCode 를 내린다(#75).
+            "institutionCode": r.get("institutionCode"),
             "itemGroupId": gid,
             "itemGroupName": group_name.get(gid, gid),
             "riskScore": rk["riskScore"],
@@ -98,7 +98,7 @@ def supply_risk_alerts_central(_admin: dict = Depends(require_role("CENTRAL"))):
         by_level[a["level"]] = by_level.get(a["level"], 0) + 1
         bi = by_institution.setdefault(
             a["institutionId"],
-            {"institutionId": a["institutionId"], "institutionName": a["institutionName"], "alerts": 0},
+            {"institutionId": a["institutionId"], "institutionCode": a.get("institutionCode"), "alerts": 0},
         )
         bi["alerts"] += 1
     top = sorted(by_institution.values(), key=lambda x: x["alerts"], reverse=True)[:20]

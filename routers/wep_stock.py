@@ -77,9 +77,9 @@ def facility_categories(_admin: dict = _central_only):
     return {"items": DB.categories()}
 
 
-@router.get("/facility-regions", tags=T_MASTER, summary="시도(또는 시군구) 목록+개수")
-def facility_regions(category: str | None = None, sido: str | None = None, _admin: dict = _central_only):
-    return DB.regions(category=category, sido=sido)
+# /facility-regions 는 2026-08-17 영구 제거됐다(이슈 #75). 시도/시군구는
+# institutions.id 의 임의매핑(#16)에 얹힌 지역 축이라 정보원 대응표 제공 예정이
+# 없어 복구하지 않는다(db/queries.py 의 regions() 도 함께 제거됨).
 
 
 @router.get("/facilities", tags=T_MASTER, summary="기관 목록+상태요약(지역·유형 필터)")

@@ -158,9 +158,10 @@ class Institution:
     name: str
     type: str
     category: str
-    sido: str
-    sigungu: str
     island: bool
+    # 정보원 원문 익명 기관코드(보건기관코드_en). sido/sigungu 는 institutions.id 의
+    # 임의매핑(#75, #16)에 얹힌 지역 정보라 더 이상 내리지 않는다.
+    institution_code: Optional[str]
 
     @strawberry.field(description="이 기관의 품목별 재고 목록 (여러 기관에 대해 동시 요청되면 DataLoader 로 배치 조회)")
     async def inventory(self, info: Info) -> List[InventoryItem]:
@@ -174,19 +175,13 @@ class Institution:
 def _to_institution(inst: dict) -> Institution:
     return Institution(
         id=inst["id"], name=inst["name"], type=inst["type"], category=inst["category"],
-        sido=inst["sido"], sigungu=inst["sigungu"], island=inst["island"],
+        island=inst["island"], institution_code=inst.get("institutionCode"),
     )
 
 
 @strawberry.type(description="기관유형 분류(보건소/보건지소/보건진료소)+개수")
 class FacilityCategory:
     category: str
-    count: int
-
-
-@strawberry.type(description="시도(또는 시군구) 이름+개수")
-class RegionCount:
-    name: str
     count: int
 
 
@@ -366,9 +361,8 @@ def _to_supply_risk(r: dict, name_map: dict) -> SupplyRisk:
 @strawberry.type(description="SS/ROP 재고 현황 (REST /inventory-policy 목록, 주요 보건소 샘플)")
 class InventoryPolicyRow:
     institution_id: str
-    institution_name: str
-    sido: str
-    sigungu: str
+    # institutionName/sido/sigungu 대신 institutionCode 를 내린다(#75).
+    institution_code: Optional[str]
     standard_code: str
     standard_name: str
     criticality: str
@@ -389,7 +383,7 @@ class InventoryPolicyRow:
 
 def _to_policy_row(r: dict) -> InventoryPolicyRow:
     return InventoryPolicyRow(
-        institution_id=r["institutionId"], institution_name=r["institutionName"], sido=r["sido"], sigungu=r["sigungu"],
+        institution_id=r["institutionId"], institution_code=r.get("institutionCode"),
         standard_code=r["standardCode"], standard_name=r["standardName"], criticality=r["criticality"], uom=r["uom"],
         on_hand=r["onHand"], available=r["available"], mu=r["mu"], sigma=r["sigma"],
         lead_time_used=r["leadTimeUsed"], z_used=r["zUsed"], ss=r["SS"], rop=r["ROP"], target=r["target"],
@@ -428,7 +422,8 @@ def _to_policy_detail(r: dict) -> InventoryPolicyDetail:
 @strawberry.type(description="발주 권고 (수량·근거)")
 class OrderRecommendation:
     institution_id: str
-    institution_name: str
+    # institutionName 대신 institutionCode 를 내린다(#75).
+    institution_code: Optional[str]
     standard_code: str
     standard_name: str
     available: int
@@ -475,17 +470,18 @@ class Alert:
     title: str
     message: str
     institution_id: Optional[str]
-    institution_name: Optional[str]
+    # institutionName 대신 institutionCode 를 내린다(#75).
+    institution_code: Optional[str]
     generated_at: str
     resolved_at: Optional[str]
     evidence: JSON
 
 
 def _to_alert_db(a: dict) -> Alert:
-    """DB.alerts_list()/alert_one() 결과(institutionName 이미 조인됨) → Alert."""
+    """DB.alerts_list()/alert_one() 결과(institutionCode 이미 조인됨) → Alert."""
     return Alert(
         alert_id=a["alertId"], alert_type=a["alertType"], severity=a["severity"], title=a["title"],
-        message=a["message"], institution_id=a.get("institutionId"), institution_name=a.get("institutionName"),
+        message=a["message"], institution_id=a.get("institutionId"), institution_code=a.get("institutionCode"),
         generated_at=a["generatedAt"], resolved_at=a.get("resolvedAt"), evidence=a.get("evidence") or {},
     )
 
@@ -552,7 +548,8 @@ class SupplyRiskRankItem:
 @strawberry.type(description="부족 상위 기관")
 class ShortageInstitution:
     institution_id: str
-    institution_name: Optional[str]
+    # institutionName 대신 institutionCode 를 내린다(#75).
+    institution_code: Optional[str]
     shortage_items: int
 
 
@@ -571,7 +568,9 @@ class DashboardInstitutionRef:
     institution_id: str
     institution_name: str
     institution_type: str
-    region_name: str
+    # region_name(sido+sigungu) 은 institutions.id 의 임의매핑(#75, #16)에 얹힌
+    # 지역 정보라 제거했다 — institutionCode(보건기관코드_en)로 대체한다.
+    institution_code: Optional[str]
 
 
 @strawberry.type(description="기관 대시보드 요약")
@@ -631,11 +630,8 @@ class Query:
         _require_central(info)
         return [FacilityCategory(category=c["category"], count=c["count"]) for c in DB.categories()]
 
-    @strawberry.field(description="시도(또는 시군구) 목록+개수")
-    def facility_regions(self, info: Info, category: Optional[str] = None, sido: Optional[str] = None) -> List[RegionCount]:
-        _require_central(info)
-        r = DB.regions(category=category, sido=sido)
-        return [RegionCount(name=x["name"], count=x["count"]) for x in r["items"]]
+    # facility_regions 는 2026-08-17 영구 제거됐다(이슈 #75) — REST /facility-regions
+    # 와 동일하게 지역 축 엔드포인트를 비활성화한다(db/queries.py 의 regions() 제거).
 
     @strawberry.field(description="품목군 목록(실데이터, SSIS 물품 입출고 이력 기반)")
     def item_groups(self, info: Info) -> List[ItemGroup]:
@@ -722,7 +718,7 @@ class Query:
         _require_central(info)
         rows = DB.order_recommendations(institution=institution)
         return [OrderRecommendation(
-            institution_id=r["institutionId"], institution_name=r["institutionName"], standard_code=r["standardCode"],
+            institution_id=r["institutionId"], institution_code=r.get("institutionCode"), standard_code=r["standardCode"],
             standard_name=r["standardName"], available=r["available"], rop=r["ROP"], target=r["target"],
             recommended_qty=r["recommendedQty"], uom=r["uom"], supply_risk_level=r["supplyRiskLevel"], status=r["status"],
         ) for r in rows]
@@ -771,7 +767,7 @@ class Query:
             sev[a["severity"]] = sev.get(a["severity"], 0) + 1
         core = DB.dashboard_central_summary()
         top_shortage = [
-            ShortageInstitution(institution_id=s["institutionId"], institution_name=s["institutionName"],
+            ShortageInstitution(institution_id=s["institutionId"], institution_code=s.get("institutionCode"),
                                  shortage_items=s["shortageItems"])
             for s in DB.top_shortage_institutions(8)
         ]
@@ -812,7 +808,7 @@ class Query:
             as_of=D.TODAY,
             institution=DashboardInstitutionRef(
                 institution_id=inst["id"], institution_name=inst["name"], institution_type=inst["type"],
-                region_name=f"{inst['sido']} {inst['sigungu']}",
+                institution_code=inst.get("institutionCode"),
             ),
             summary=InstitutionDashboardSummary(
                 tracked_items=d["summary"]["trackedItems"], below_rop=d["summary"]["belowRop"],
